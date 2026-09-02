@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "听写辨音助手",
-  "version": "2.6.1",
-  "description": "雅思听写辅助：悬浮面板复数与可数用法、读音对比收藏、声音—错误字母映射及 DeepSeek 解释。",
+  "version": "2.6.2",
+  "description": "雅思听写辅助：复数收藏、紧凑相似词操作、可靠的读音对比播放及 DeepSeek 解释。",
   "permissions": ["storage"],
   "host_permissions": [
     "https://ielts.itongzhuo.com/*",

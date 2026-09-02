@@ -9,6 +9,19 @@ const groupCount = document.querySelector("#group-count");
 const pairCount = document.querySelector("#pair-count");
 let comparisons = [];
 let activeAudio = null;
+let activeAudioRestore = null;
+const wordAudioCache = new Map();
+const wordAudioPending = new Map();
+const wordAudioLoaders = new WeakMap();
+const wordAudioObserver = "IntersectionObserver" in window
+  ? new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        wordAudioObserver.unobserve(entry.target);
+        wordAudioLoaders.get(entry.target)?.();
+      }
+    }, { rootMargin: "420px 0px" })
+  : null;
 const pluralUsageCache = new Map();
 const pluralUsagePending = new Map();
 const pluralLoaders = new WeakMap();
@@ -40,6 +53,7 @@ function loadComparisons() {
 
 function render() {
   pluralObserver?.disconnect();
+  wordAudioObserver?.disconnect();
   list.replaceChildren();
   const query = normalize(search.value);
   const accent = accentFilter.value;
@@ -108,8 +122,17 @@ function renderWordCard(word, accent, recordId = "") {
   schedulePluralUsage(word.word, accent, pluralBox);
   const play = textNode("button", "🔊", "play-word");
   play.type = "button";
+  play.disabled = true;
+  play.classList.add("loading");
   play.title = `播放 ${word.word} 的${accent === "uk" ? "英式" : "美式"}发音`;
-  play.addEventListener("click", () => playWord(word.word, accent, play));
+  play.setAttribute("aria-label", play.title);
+  let preparedAudioUrl = "";
+  scheduleWordAudio(play, word.word, accent, (audioUrl) => {
+    preparedAudioUrl = audioUrl;
+    play.disabled = false;
+    play.classList.remove("loading");
+  });
+  play.addEventListener("click", () => playWord(word.word, accent, play, preparedAudioUrl));
   card.append(details, play);
   if (recordId) {
     const remove = textNode("button", "取消收藏", "remove-pair");
@@ -177,8 +200,14 @@ function renderPluralUsage(container, response, baseWord, accent) {
   if (data.plural) {
     const play = textNode("button", "🔊", "plural-play");
     play.type = "button";
+    play.disabled = true;
     play.title = `播放 ${data.plural} 的发音`;
-    play.addEventListener("click", () => playWord(data.plural, accent, play));
+    let preparedAudioUrl = "";
+    prepareWordAudio(data.plural, accent).then((audioUrl) => {
+      preparedAudioUrl = audioUrl;
+      play.disabled = false;
+    });
+    play.addEventListener("click", () => playWord(data.plural, accent, play, preparedAudioUrl));
     line.append(play);
   }
   container.append(line);
@@ -195,35 +224,77 @@ function nounTypeLabel(value) {
   return "非名词用法";
 }
 
-function playWord(word, accent, button) {
+function prepareWordAudio(word, accent) {
+  const key = `${accent}:${normalize(word)}`;
+  if (wordAudioCache.has(key)) return Promise.resolve(wordAudioCache.get(key));
+  if (wordAudioPending.has(key)) return wordAudioPending.get(key);
+  const pending = new Promise((resolve) => {
+    let settled = false;
+    const finish = (audioUrl = "") => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      wordAudioCache.set(key, audioUrl);
+      wordAudioPending.delete(key);
+      resolve(audioUrl);
+    };
+    const timeout = window.setTimeout(() => finish(""), 8000);
+    chrome.runtime.sendMessage({ type: "GET_COMPARISON_AUDIO", word, accent }, (response) => {
+      finish(chrome.runtime.lastError || !response?.ok ? "" : response.audioUrl || "");
+    });
+  });
+  wordAudioPending.set(key, pending);
+  return pending;
+}
+
+function scheduleWordAudio(button, word, accent, onReady) {
+  const load = () => prepareWordAudio(word, accent).then(onReady);
+  if (!wordAudioObserver) {
+    load();
+    return;
+  }
+  wordAudioLoaders.set(button, load);
+  wordAudioObserver.observe(button);
+}
+
+function stopWordAudio() {
   if (activeAudio) {
     activeAudio.pause();
+    activeAudio.currentTime = 0;
     activeAudio = null;
   }
-  const original = button.textContent;
-  button.disabled = true;
-  button.textContent = "…";
-  chrome.runtime.sendMessage({ type: "GET_COMPARISON_AUDIO", word, accent }, (response) => {
-    const restore = () => {
-      button.disabled = false;
-      button.textContent = original;
-    };
-    if (chrome.runtime.lastError || !response?.ok || !response.audioUrl) {
-      speakWord(word, accent);
-      restore();
-      return;
-    }
-    const audio = new Audio(response.audioUrl);
-    activeAudio = audio;
-    audio.addEventListener("ended", restore, { once: true });
-    audio.addEventListener("error", () => {
-      speakWord(word, accent);
-      restore();
-    }, { once: true });
-    audio.play().catch(() => {
-      speakWord(word, accent);
-      restore();
-    });
+  activeAudioRestore?.();
+  activeAudioRestore = null;
+}
+
+function playWord(word, accent, button, audioUrl = "") {
+  stopWordAudio();
+  let restored = false;
+  const restore = () => {
+    if (restored) return;
+    restored = true;
+    button.classList.remove("playing");
+    button.setAttribute("aria-pressed", "false");
+    if (activeAudioRestore === restore) activeAudioRestore = null;
+  };
+  activeAudioRestore = restore;
+  button.classList.add("playing");
+  button.setAttribute("aria-pressed", "true");
+  if (!audioUrl) {
+    speakWord(word, accent);
+    restore();
+    return;
+  }
+  const audio = new Audio(audioUrl);
+  activeAudio = audio;
+  audio.addEventListener("ended", restore, { once: true });
+  audio.addEventListener("error", () => {
+    speakWord(word, accent);
+    restore();
+  }, { once: true });
+  audio.play().catch(() => {
+    speakWord(word, accent);
+    restore();
   });
 }
 

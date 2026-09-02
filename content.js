@@ -772,6 +772,22 @@
       container.append(ipa);
     }
     container.append(element("strong", data.note || `${target?.word || "该词"} 的复数用法需结合语境判断。`, "plural-note"));
+    if (data.plural && target?.word) {
+      const actions = element("div", "", "plural-actions");
+      const favorite = element("button", "♡ 收藏复数对比", "favorite-button plural-favorite");
+      const pluralCandidate = {
+        word: data.plural,
+        ipa: data.pluralIpa || "",
+        meaning: `${target.meaning || target.word}（复数）`
+      };
+      favorite.type = "button";
+      favorite.dataset.favoriteId = comparisonId(target, pluralCandidate, settings.accent);
+      favorite.title = `把 ${target.word} 和复数 ${data.plural} 保存到读音对比表`;
+      favorite.addEventListener("click", () => savePronunciationComparison(target, pluralCandidate, favorite));
+      actions.append(favorite);
+      container.append(actions);
+      refreshFavoriteButtons(container);
+    }
   }
 
   function pluralNounType(value) {
@@ -888,18 +904,20 @@
       for (const label of formatSourceLabels(item).slice(0, 3)) {
         identity.append(element("span", label, "book-badge"));
       }
-      top.append(identity, audioButton(item.audioUrl, item.word, String(index + 1)));
-      const ipa = element("div", "", "ipa candidate-ipa");
-      renderIpa(ipa, item.tokens || P.tokenizeIpa(item.ipa).map((token) => ({ token, different: false })), settings.accent);
-      const actions = element("div", "", "candidate-actions");
-      const favorite = element("button", "♡ 收藏对比", "favorite-button");
+      const controls = element("div", "", "candidate-controls");
+      const play = audioButton(item.audioUrl, item.word, String(index + 1));
+      const favorite = element("button", "♡ 收藏", "favorite-button candidate-favorite");
       favorite.type = "button";
       favorite.dataset.favoriteId = comparisonId(target, item, settings.accent);
       favorite.disabled = !target?.word || !item?.word;
       favorite.title = "把本题原词和这个相似词保存到读音对比表";
+      favorite.setAttribute("aria-label", `收藏 ${item.word} 的读音对比`);
       favorite.addEventListener("click", () => savePronunciationComparison(target, item, favorite));
-      actions.append(favorite);
-      card.append(top, ipa, element("p", item.meaning || "暂无中文释义", "candidate-meaning"), actions);
+      controls.append(play, favorite);
+      top.append(identity, controls);
+      const ipa = element("div", "", "ipa candidate-ipa");
+      renderIpa(ipa, item.tokens || P.tokenizeIpa(item.ipa).map((token) => ({ token, different: false })), settings.accent);
+      card.append(top, ipa, element("p", item.meaning || "暂无中文释义", "candidate-meaning"));
       container.append(card);
     }
     refreshFavoriteButtons(container);
@@ -924,7 +942,7 @@
       const ids = new Set((Array.isArray(state[COMPARISONS_KEY]) ? state[COMPARISONS_KEY] : []).map((item) => item?.id));
       for (const button of container.querySelectorAll(".favorite-button")) {
         if (!ids.has(button.dataset.favoriteId)) continue;
-        button.textContent = "✓ 已收藏";
+        button.textContent = button.classList.contains("candidate-favorite") ? "✓ 已藏" : "✓ 已收藏";
         button.classList.add("saved");
         button.disabled = true;
       }
@@ -934,7 +952,7 @@
   function savePronunciationComparison(target, candidate, button) {
     if (!target?.word || !candidate?.word || button.disabled) return;
     button.disabled = true;
-    button.textContent = "保存中…";
+    button.textContent = button.classList.contains("candidate-favorite") ? "…" : "保存中…";
     const id = comparisonId(target, candidate, settings.accent);
     chrome.storage.local.get({ [COMPARISONS_KEY]: [] }, (state) => {
       const stored = Array.isArray(state[COMPARISONS_KEY]) ? state[COMPARISONS_KEY] : [];
@@ -952,7 +970,7 @@
           button.textContent = "保存失败，重试";
           return;
         }
-        button.textContent = "✓ 已收藏";
+        button.textContent = button.classList.contains("candidate-favorite") ? "✓ 已藏" : "✓ 已收藏";
         button.classList.add("saved");
         button.disabled = true;
       });
@@ -1343,9 +1361,9 @@
       .sound-grid{margin-top:11px;border:1px solid #e1e6ee;border-radius:11px;overflow:hidden}.sound-row{display:grid;grid-template-columns:minmax(72px,.85fr) 1fr 1fr;align-items:stretch}.sound-row+ .sound-row{border-top:1px solid #edf0f5}.sound-header{background:#f3f6fa;color:#65738a;font-size:10px;font-weight:800}.sound-row>span,.sound-row>.sound-block-button{min-width:0;padding:8px 7px;border:0;border-right:1px solid #edf0f5;background:transparent;text-align:center}.sound-row>*:last-child{border-right:0}.sound-block-button{color:#3356a8;font-weight:900;cursor:pointer}.sound-block-button:hover{background:#edf2ff}.sound-block-button:disabled{color:#8b95a5;cursor:default}.alignment-cell{display:flex!important;align-items:center;justify-content:center;gap:1px;font-size:17px}.alignment-part{min-width:12px;padding:2px 1px;border-radius:4px}.alignment-part.correct{color:#087f5b;background:#e6fcf5}.alignment-part.error,.alignment-part.extra{color:#c92a2a;background:#fff0f0}.alignment-part.missing{color:#9a6700;background:#fff3bf}.alignment-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;color:#6b778d;font-size:10px}.legend-item{display:inline-flex;align-items:center;gap:4px}.legend-dot{width:9px;height:9px;border-radius:3px}.legend-dot.correct{background:#63d5ad}.legend-dot.error{background:#ff8787}.legend-dot.missing{background:#ffd43b}
       .issue-list{display:grid;gap:7px;margin-top:10px}.issue-card{padding:9px 10px;border:1px solid #f1d5d2;border-left:3px solid #ff6259;border-radius:9px;background:#fff9f8}.issue-title{font-size:12px;color:#772f37}.issue-explanation,.issue-training{margin:4px 0 0;font-size:11px;line-height:1.5}.issue-explanation{color:#5a4650}.issue-training{color:#3e5c9a}.issue-card.missing_letter{border-left-color:#f4b400;background:#fffdf5}
       .deepseek{margin-top:12px;padding:12px;background:linear-gradient(180deg,#fff 0%,#fbfcff 100%)}.deepseek-heading,.learning-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}.deepseek-heading>strong,.learning-heading>strong{font-size:13px}.deepseek-badge{padding:3px 7px;border-radius:99px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:800}.deepseek-loading,.deepseek-note,.deepseek-error{margin:9px 0 0;padding:10px;border-radius:9px;font-size:11px;line-height:1.55}.deepseek-loading{color:#59677d;background:#f3f6fa}.deepseek-note{color:#5e6d84;background:#f5f7fb}.deepseek-error{color:#a43a35;background:#fff0ef}.deepseek-part{margin-top:11px}.deepseek-part h3{margin:0 0 7px;font-size:11px;color:#526078}.synonym-list,.expression-list{display:grid;gap:7px}.synonym-item,.expression-item{padding:8px 9px;border:1px solid #e7ebf2;border-radius:9px;background:#fff}.synonym-title,.expression-title{display:flex;align-items:center;justify-content:space-between;gap:8px}.synonym-title strong,.expression-title strong{font-size:12px;color:#23304a}.synonym-title span,.expression-title span{flex:0 0 auto;padding:2px 6px;border-radius:99px;background:#eef2ff;color:#4960ac;font-size:9px}.synonym-item p,.expression-item p{margin:4px 0 0;color:#4b5a72;font-size:10px;line-height:1.5}.synonym-item small,.expression-item small{display:block;margin-top:4px;color:#718096;font-size:9px;line-height:1.5}
-      .plural{margin-top:12px;padding:10px 11px;background:linear-gradient(180deg,#fff 0%,#fbfcff 100%)}.plural-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.plural-heading>strong{font-size:13px}.plural-badge{padding:3px 7px;border-radius:99px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:800}.plural-state{display:block;margin-top:8px;padding:8px 9px;border-radius:8px;background:#f3f6fa;color:#59677d;font-size:10px;line-height:1.45}.plural-state.unavailable{color:#6d788b;background:#f7f8fa}.plural-state.error{color:#a43a35;background:#fff0ef}.plural-line{display:flex;align-items:center;gap:6px;margin-top:8px;min-width:0}.plural-label{padding:2px 6px;border-radius:6px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:900}.plural-word{min-width:0;overflow:hidden;color:#243552;font-size:17px;text-overflow:ellipsis;white-space:nowrap}.plural-type{padding:2px 6px;border-radius:99px;background:#e7f6ef;color:#087f5b;font-size:9px;font-weight:800}.plural-type.uncountable,.plural-type.not_noun{background:#f1f3f6;color:#667085}.plural-type.both{background:#fff1cc;color:#9a5b00}.plural-play{width:30px;height:28px;margin-left:auto;border:1px solid #ccd6ee;border-radius:8px;background:#fff;color:#4058a9;cursor:pointer}.plural-play:hover{background:#edf1ff}.plural-play:disabled{cursor:wait;opacity:.55}.plural-ipa{margin-top:3px;font-size:17px;color:#526a9a}.plural-note{display:block;margin-top:5px;color:#2f3b51;font-size:10px;line-height:1.5}
+      .plural{margin-top:10px;padding:9px 10px;background:linear-gradient(180deg,#fff 0%,#fbfcff 100%)}.plural-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.plural-heading>strong{font-size:12px}.plural-badge{padding:3px 7px;border-radius:99px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:800}.plural-state{display:block;margin-top:7px;padding:7px 8px;border-radius:8px;background:#f3f6fa;color:#59677d;font-size:10px;line-height:1.4}.plural-state.unavailable{color:#6d788b;background:#f7f8fa}.plural-state.error{color:#a43a35;background:#fff0ef}.plural-line{display:flex;align-items:center;gap:6px;margin-top:7px;min-width:0}.plural-label{padding:2px 6px;border-radius:6px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:900}.plural-word{min-width:0;overflow:hidden;color:#243552;font-size:16px;text-overflow:ellipsis;white-space:nowrap}.plural-type{padding:2px 6px;border-radius:99px;background:#e7f6ef;color:#087f5b;font-size:9px;font-weight:800}.plural-type.uncountable,.plural-type.not_noun{background:#f1f3f6;color:#667085}.plural-type.both{background:#fff1cc;color:#9a5b00}.plural-play{width:30px;height:27px;margin-left:auto;border:1px solid #ccd6ee;border-radius:8px;background:#fff;color:#4058a9;cursor:pointer}.plural-play:hover{background:#edf1ff}.plural-play:disabled{cursor:wait;opacity:.55}.plural-ipa{margin-top:2px;font-size:16px;color:#526a9a}.plural-note{display:block;margin-top:4px;color:#2f3b51;font-size:10px;line-height:1.45}.plural-actions{display:flex;justify-content:flex-end;margin-top:6px;padding-top:6px;border-top:1px dashed #e6eaf0}.plural-favorite{height:27px!important}
       .learning{margin-top:12px;padding:12px}.learning-total{font-size:10px;color:#78859a}.weakness-match{display:grid;gap:3px;margin-top:8px;padding:8px;border-radius:9px;background:#fff5e6;border:1px solid #ffe0ad}.weakness-match strong{font-size:10px;color:#9a5b00}.weakness-match span{font-size:10px;color:#6b5738}.pattern-list{display:grid;gap:7px;margin-top:8px}.pattern-item{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:9px;background:#f5f7fb}.pattern-mapping{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}.pattern-sound{font-size:15px;color:#2f4b90}.pattern-correct,.pattern-wrong{padding:2px 6px;border-radius:6px;font-size:10px}.pattern-correct{color:#087f5b;background:#e6fcf5}.pattern-wrong{color:#c92a2a;background:#fff0f0}.pattern-meta{display:grid;justify-items:end;gap:2px;flex:0 0 auto}.pattern-count{white-space:nowrap;font-size:10px;color:#b54b44}.pattern-meta small{max-width:130px;color:#7b8799;font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      .candidate-section{margin-top:12px}.section-title{display:flex;align-items:center;justify-content:space-between;margin:0 2px 9px}.section-title>div{display:flex;flex-direction:column;gap:2px}.section-title strong{font-size:14px}.section-title small{font-size:10px;color:#7a8698}.candidate-count{padding:4px 8px;color:#ff514c;background:#ffe9e7;font-size:11px}.candidates{display:grid;gap:9px}.candidate-card{padding:12px}.candidate-card.typed-candidate{border-color:#8fa1e6;background:linear-gradient(135deg,#f6f8ff,#fff)}.candidate-identity{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.candidate-word{font-size:23px;color:#172033}.match-badge{font-size:10px;padding:3px 6px;color:#4058a9;background:#e9edff}.priority-badge{font-size:10px;padding:3px 6px;color:#9b5200;background:#fff0c7}.book-badge{font-size:10px;padding:3px 6px;color:#506076;background:#eef2f7}.candidate-ipa{font-size:23px;margin-top:4px}.candidate-meaning{margin:5px 0 0;color:#45536b;font-size:12px;line-height:1.5}.candidate-actions{display:flex;justify-content:flex-end;margin-top:9px;padding-top:8px;border-top:1px dashed #e6eaf0}.favorite-button{height:30px;padding:0 10px;border:1px solid #ffaaa5;border-radius:9px;background:#fff5f4;color:#d94841;font-size:10px;font-weight:800;cursor:pointer}.favorite-button:hover{background:#ffe7e5}.favorite-button.saved{border-color:#b8decf;background:#e9f8f2;color:#087f5b}.favorite-button:disabled{cursor:default;opacity:.8}
+      .candidate-section{margin-top:10px}.section-title{display:flex;align-items:center;justify-content:space-between;margin:0 2px 7px}.section-title>div{display:flex;flex-direction:column;gap:1px}.section-title strong{font-size:13px}.section-title small{font-size:9px;color:#7a8698}.candidate-count{padding:3px 7px;color:#ff514c;background:#ffe9e7;font-size:10px}.candidates{display:grid;gap:6px}.candidate-card{padding:9px 10px}.candidate-card.typed-candidate{border-color:#8fa1e6;background:linear-gradient(135deg,#f6f8ff,#fff)}.candidate-top{gap:8px}.candidate-identity{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}.candidate-word{font-size:20px;line-height:1.15;color:#172033}.match-badge{font-size:9px;padding:2px 5px;color:#4058a9;background:#e9edff}.priority-badge{font-size:9px;padding:2px 5px;color:#9b5200;background:#fff0c7}.book-badge{font-size:9px;padding:2px 5px;color:#506076;background:#eef2f7}.candidate-controls{display:grid;flex:0 0 52px;gap:4px;width:52px}.candidate-controls .audio-button,.candidate-controls .favorite-button{width:52px;min-width:52px}.candidate-controls .audio-button{height:30px;border-radius:8px}.candidate-ipa{font-size:20px;margin-top:1px}.candidate-meaning{margin:3px 0 0;color:#45536b;font-size:11px;line-height:1.4}.favorite-button{height:27px;padding:0 8px;border:1px solid #ffaaa5;border-radius:8px;background:#fff5f4;color:#d94841;font-size:9px;font-weight:800;white-space:nowrap;cursor:pointer}.favorite-button:hover{background:#ffe7e5}.favorite-button.saved{border-color:#b8decf;background:#e9f8f2;color:#087f5b}.favorite-button:disabled{cursor:default;opacity:.8}.candidate-favorite{padding:0 3px}
       @media(max-width:600px){.panel{width:calc(100vw - 16px);min-width:calc(100vw - 16px)}.body{padding:10px}.word{font-size:24px}.target-ipa{font-size:24px}}
     `;
   }

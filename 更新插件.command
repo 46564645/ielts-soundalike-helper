@@ -40,6 +40,8 @@ fi
 if git pull --ff-only; then
   echo
   echo "代码已经更新完成。"
+  echo "收藏列表和 DeepSeek API Key 保存在 Chrome 本地，本次更新不会清除。"
+  echo "请不要删除扩展或换文件夹重新安装。"
   echo "接下来打开 chrome://extensions，找到“听写辨音助手”，点击“重新加载”。"
   open -a "Google Chrome" "chrome://extensions" >/dev/null 2>&1 || true
 else
@@ -50,4 +52,3 @@ fi
 echo
 echo "按任意键关闭窗口。"
 read -k 1
-

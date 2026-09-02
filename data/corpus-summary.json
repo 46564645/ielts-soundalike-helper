@@ -1,0 +1,32 @@
+{
+  "total": 4148,
+  "answerWords": 1746,
+  "answerBooks": {
+    "高频": 957,
+    "基础": 592,
+    "进阶": 197
+  },
+  "coreMemberships": 1950,
+  "coreUnique": 1950,
+  "sceneMemberships": {
+    "1": 344,
+    "2": 108,
+    "3": 151,
+    "4": 119,
+    "5": 435,
+    "6": 422,
+    "7": 241,
+    "8": 183,
+    "9": 99,
+    "10": 74
+  },
+  "sceneMembershipTotal": 2176,
+  "sceneUnique": 1615,
+  "collectionOverlap": {
+    "answerAndCore": 829,
+    "answerAndScene": 320,
+    "coreAndScene": 14
+  },
+  "duplicateScene6AttachmentIgnored": true,
+  "priorityMatches": 1470
+}

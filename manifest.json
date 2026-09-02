@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "听写辨音助手",
+  "version": "2.6.1",
+  "description": "雅思听写辅助：悬浮面板复数与可数用法、读音对比收藏、声音—错误字母映射及 DeepSeek 解释。",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://ielts.itongzhuo.com/*",
+    "https://www.idictation.cn/*",
+    "https://ai-oss3.oss-cn-shenzhen.aliyuncs.com/*",
+    "https://api.datamuse.com/*",
+    "https://api.deepseek.com/*",
+    "https://dict.youdao.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://ielts.itongzhuo.com/business/ielts/student/jumpAnswerWordDictation.do*",
+        "https://www.idictation.cn/*"
+      ],
+      "js": ["lib/phonetics.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["audio/phonemes/kk/*.mp3"],
+      "matches": ["https://ielts.itongzhuo.com/*", "https://www.idictation.cn/*"]
+    }
+  ],
+  "action": {
+    "default_title": "听写辨音助手",
+    "default_popup": "popup.html"
+  },
+  "options_page": "comparison.html"
+}

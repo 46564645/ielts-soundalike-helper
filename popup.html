@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>听写辨音助手</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div class="brand-mark" aria-hidden="true">Aa</div>
+      <div><h1>听写辨音助手</h1><p>先拼写，判题后再揭晓</p></div>
+    </header>
+
+    <section class="flow" aria-label="运行流程">
+      <div><span>1</span><strong>听写时</strong><small>后台准备，不显示提示</small></div>
+      <i>→</i>
+      <div><span>2</span><strong>判题后</strong><small>显示辨音面板</small></div>
+      <i>→</i>
+      <div><span>3</span><strong>下一题</strong><small>保留为“上一题”</small></div>
+    </section>
+
+    <section class="settings">
+      <label class="setting-row" for="enabled">
+        <span><strong>启用页面助手</strong><small>支持智能选择与答案词拼写</small></span>
+        <input id="enabled" type="checkbox" role="switch" checked>
+      </label>
+
+      <fieldset>
+        <legend>单词与音素发音</legend>
+        <label><input type="radio" name="accent" value="us" checked><span>🇺🇸 美式</span></label>
+        <label><input type="radio" name="accent" value="uk"><span>🇬🇧 英式</span></label>
+      </fieldset>
+
+      <div class="fixed-row"><span><strong>相近词上限</strong><small>实际符合几个就显示几个</small></span><b>最多 5 个</b></div>
+      <div class="shortcut-help"><strong>发音快捷键</strong><span><kbd>·</kbd> 主词　<kbd>1</kbd>–<kbd>5</kbd> 相似词</span></div>
+      <section class="deepseek-settings" aria-labelledby="deepseek-title">
+        <label class="deepseek-toggle" for="deepseek-enabled">
+          <span><strong id="deepseek-title">DeepSeek 词汇应用</strong><small>词载入时用快速模型提前准备</small></span>
+          <input id="deepseek-enabled" type="checkbox" role="switch" checked>
+        </label>
+        <div class="model-row"><span>模型</span><b>deepseek-v4-flash（快速）</b></div>
+        <label class="api-key-label" for="deepseek-api-key">API Key
+          <input id="deepseek-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="输入 DeepSeek API Key">
+        </label>
+        <div class="api-actions">
+          <button id="save-deepseek" type="button">保存到本机</button>
+          <button id="clear-deepseek" type="button">清除 Key</button>
+        </div>
+        <small id="deepseek-status" class="deepseek-status">尚未配置</small>
+      </section>
+      <div class="learning-summary"><strong>音标—错误字母映射记录</strong><span id="learning-stats">尚无错题记录</span><small>记录哪个声音被写成了哪个错误字母</small></div>
+      <div class="corpus"><strong>本地雅思词库 4148 条</strong><span>答案词 1746 · 核心词 1950 · 场景词 10 类</span></div>
+    </section>
+
+    <a class="comparison-link" href="comparison.html" target="_blank">
+      <span><strong>打开读音对比表</strong><small>翻阅已收藏的“原词 + 相似词”组合</small></span><b>收藏夹 →</b>
+    </a>
+    <button id="reopen" class="reopen" type="button">重新显示已关闭的面板</button>
+    <a class="open-page" href="https://ielts.itongzhuo.com/business/ielts/student/jumpAnswerWordDictation.do?sSubjects=0&amp;leftType=1" target="_blank" rel="noreferrer">打开同桌雅思 <span>→</span></a>
+    <a class="open-page" href="https://www.idictation.cn/home" target="_blank" rel="noreferrer">打开爱听写 <span>→</span></a>
+    <p class="privacy">拼写过程中不会显示答案提示。错误映射和 API Key 只保存在本机浏览器；启用 DeepSeek 后，仅发送当前单词及本地中文释义，不发送你的拼写答案。</p>
+    <div id="saved" class="saved" aria-live="polite">设置已保存</div>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

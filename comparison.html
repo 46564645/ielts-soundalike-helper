@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>读音对比表 - 听写辨音助手</title>
+  <link rel="stylesheet" href="comparison.css">
+  <link rel="stylesheet" href="plural.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span aria-hidden="true">Aa</span><div><h1>读音对比表</h1><p>把原词和收藏的相似词放在一起反复辨音</p></div></div>
+    <div class="summary"><strong id="group-count">0</strong> 个原词组 · <strong id="pair-count">0</strong> 个收藏词</div>
+  </header>
+
+  <main>
+    <section class="toolbar" aria-label="筛选收藏">
+      <label for="search">搜索单词或中文释义</label>
+      <input id="search" type="search" autocomplete="off" placeholder="例如 flight、航班">
+      <select id="accent-filter" aria-label="发音类型">
+        <option value="all">全部发音</option>
+        <option value="us">美式</option>
+        <option value="uk">英式</option>
+      </select>
+    </section>
+
+    <section id="comparison-list" class="comparison-list" aria-live="polite"></section>
+    <section id="empty" class="empty" hidden>
+      <div aria-hidden="true">♡</div>
+      <h2>还没有收藏的读音对比</h2>
+      <p>完成一道听写后，在相似词卡片底部点击“收藏对比”，原词和收藏词就会出现在这里。</p>
+    </section>
+  </main>
+
+  <script src="comparison.js"></script>
+</body>
+</html>

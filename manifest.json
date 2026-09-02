@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "听写辨音助手",
-  "version": "2.6.2",
+  "version": "2.6.3",
   "description": "雅思听写辅助：复数收藏、紧凑相似词操作、可靠的读音对比播放及 DeepSeek 解释。",
   "permissions": ["storage"],
   "host_permissions": [

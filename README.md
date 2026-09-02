@@ -1,9 +1,14 @@
-# 听写辨音助手 v2.6.2
+# 听写辨音助手 v2.6.3
 
 这是为以下雅思听写页面定制的 Chrome / Edge 扩展：
 
 - `https://ielts.itongzhuo.com/business/ielts/student/jumpAnswerWordDictation.do`
 - `https://www.idictation.cn/home`
+
+## v2.6.3 收藏可取消
+
+- 悬浮面板中的相似词与复数收藏按钮改为双向切换：收藏后按钮显示“取消”，再次点击会从读音对比表移除。
+- 同一收藏项在当前面板的不同位置出现时，状态会即时同步。
 
 ## v2.6.2 播放、复数收藏与紧凑操作
 

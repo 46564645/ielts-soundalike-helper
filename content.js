@@ -783,6 +783,7 @@
       favorite.type = "button";
       favorite.dataset.favoriteId = comparisonId(target, pluralCandidate, settings.accent);
       favorite.title = `把 ${target.word} 和复数 ${data.plural} 保存到读音对比表`;
+      favorite.dataset.saveTitle = favorite.title;
       favorite.addEventListener("click", () => savePronunciationComparison(target, pluralCandidate, favorite));
       actions.append(favorite);
       container.append(actions);
@@ -911,6 +912,7 @@
       favorite.dataset.favoriteId = comparisonId(target, item, settings.accent);
       favorite.disabled = !target?.word || !item?.word;
       favorite.title = "把本题原词和这个相似词保存到读音对比表";
+      favorite.dataset.saveTitle = favorite.title;
       favorite.setAttribute("aria-label", `收藏 ${item.word} 的读音对比`);
       favorite.addEventListener("click", () => savePronunciationComparison(target, item, favorite));
       controls.append(play, favorite);
@@ -941,18 +943,35 @@
     chrome.storage.local.get({ [COMPARISONS_KEY]: [] }, (state) => {
       const ids = new Set((Array.isArray(state[COMPARISONS_KEY]) ? state[COMPARISONS_KEY] : []).map((item) => item?.id));
       for (const button of container.querySelectorAll(".favorite-button")) {
-        if (!ids.has(button.dataset.favoriteId)) continue;
-        button.textContent = button.classList.contains("candidate-favorite") ? "✓ 已藏" : "✓ 已收藏";
-        button.classList.add("saved");
-        button.disabled = true;
+        setFavoriteButtonState(button, ids.has(button.dataset.favoriteId));
       }
     });
   }
 
+  function setFavoriteButtonState(button, saved) {
+    const compact = button.classList.contains("candidate-favorite");
+    button.dataset.saved = saved ? "true" : "false";
+    button.textContent = saved ? compact ? "✓ 取消" : "✓ 取消收藏" : compact ? "♡ 收藏" : "♡ 收藏复数对比";
+    button.classList.toggle("saved", saved);
+    button.disabled = false;
+    button.title = saved ? "再次点击取消这条读音对比收藏" : button.dataset.saveTitle || button.title;
+  }
+
+  function syncFavoriteButtons(id, saved) {
+    for (const container of [overlayUi?.candidates, overlayUi?.plural]) {
+      if (!container) continue;
+      for (const button of container.querySelectorAll(".favorite-button")) {
+        if (button.dataset.favoriteId === id) setFavoriteButtonState(button, saved);
+      }
+    }
+  }
+
   function savePronunciationComparison(target, candidate, button) {
     if (!target?.word || !candidate?.word || button.disabled) return;
+    const wasSaved = button.dataset.saved === "true";
+    if (!button.dataset.saveTitle) button.dataset.saveTitle = button.title;
     button.disabled = true;
-    button.textContent = button.classList.contains("candidate-favorite") ? "…" : "保存中…";
+    button.textContent = button.classList.contains("candidate-favorite") ? "…" : wasSaved ? "取消中…" : "保存中…";
     const id = comparisonId(target, candidate, settings.accent);
     chrome.storage.local.get({ [COMPARISONS_KEY]: [] }, (state) => {
       const stored = Array.isArray(state[COMPARISONS_KEY]) ? state[COMPARISONS_KEY] : [];
@@ -963,16 +982,17 @@
         candidate: comparisonWord(candidate),
         createdAt: Date.now()
       };
-      const next = [record, ...stored.filter((item) => item?.id !== id)].slice(0, 300);
+      const next = wasSaved
+        ? stored.filter((item) => item?.id !== id)
+        : [record, ...stored.filter((item) => item?.id !== id)].slice(0, 300);
       chrome.storage.local.set({ [COMPARISONS_KEY]: next }, () => {
         if (chrome.runtime.lastError) {
-          button.disabled = false;
-          button.textContent = "保存失败，重试";
+          setFavoriteButtonState(button, wasSaved);
+          button.textContent = wasSaved ? "取消失败，重试" : "保存失败，重试";
           return;
         }
-        button.textContent = button.classList.contains("candidate-favorite") ? "✓ 已藏" : "✓ 已收藏";
-        button.classList.add("saved");
-        button.disabled = true;
+        setFavoriteButtonState(button, !wasSaved);
+        syncFavoriteButtons(id, !wasSaved);
       });
     });
   }

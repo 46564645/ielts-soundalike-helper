@@ -1,0 +1,28 @@
+.template-box {
+  display: grid;
+  gap: 3px;
+  margin-top: 9px;
+  padding: 9px 10px;
+  border: 1px solid #dce3f7;
+  border-radius: 10px;
+  background: #f5f7ff;
+}
+.template-box span {
+  color: #6577bb;
+  font-size: 8px;
+  font-weight: 900;
+}
+.template-box strong {
+  color: #2f477f;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.template-box small {
+  color: #7a869d;
+  font-size: 9px;
+  line-height: 1.45;
+}
+.topic.part {
+  background: #e8f7f0;
+  color: #087f5b;
+}

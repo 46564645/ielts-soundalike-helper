@@ -1,9 +1,16 @@
-# 听写辨音助手 v2.7.1
+# 听写辨音助手 v2.7.2
 
 这是为以下雅思听写页面定制的 Chrome / Edge 扩展：
 
 - `https://ielts.itongzhuo.com/business/ielts/student/jumpAnswerWordDictation.do`
 - `https://www.idictation.cn/home`
+
+## v2.7.2 雅思口语模板化提取
+
+- 精听分析不再返回孤立“高级短语”，只筛选能直接放进雅思口语 Part 1、Part 2 或 Part 3 的可迁移词组与句型。
+- 每项新增带 `[person]`、`[activity]`、`[reason]` 等可替换槽位的“可直接套用模板”，并说明槽位应该填什么。
+- 结果会标注适用 Part、口语话题和在答案中的使用位置；例句必须替换好槽位，能够直接朗读。
+- 明确排除专有名词、文章专属事实、文学化表达、过度书面语和孤立单词。
 
 ## v2.7.1 词组发音引擎修复
 

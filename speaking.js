@@ -118,7 +118,7 @@ function renderList() {
   phraseList.replaceChildren();
   const source = view === "favorites" ? favorites : job.result.phrases;
   const query = normalize(search.value);
-  const filtered = source.filter((item) => !query || normalize(`${item.phrase} ${item.meaningZh} ${item.usageZh} ${(item.topics || []).join(" ")}`).includes(query));
+  const filtered = source.filter((item) => !query || normalize(`${item.phrase} ${item.template} ${item.slotGuide} ${item.meaningZh} ${item.usageZh} ${(item.parts || []).join(" ")} ${(item.topics || []).join(" ")}`).includes(query));
   empty.hidden = filtered.length > 0;
   for (const phrase of filtered) phraseList.append(renderPhrase(phrase));
 }
@@ -128,8 +128,12 @@ function renderPhrase(item) {
   const body = node("div");
   const heading = node("div", "phrase-heading");
   heading.append(textNode("h2", item.phrase), textNode("span", item.register || "自然口语", "register"));
-  body.append(heading, textNode("p", item.meaningZh || "", "meaning"), textNode("p", item.usageZh || "", "usage"));
+  const template = node("section", "template-box");
+  template.append(textNode("span", "可直接套用模板"), textNode("strong", item.template || item.phrase));
+  if (item.slotGuide) template.append(textNode("small", item.slotGuide));
+  body.append(heading, template, textNode("p", item.meaningZh || "", "meaning"), textNode("p", item.usageZh || "", "usage"));
   const topics = node("div", "topics");
+  for (const part of item.parts || []) topics.append(textNode("span", part, "topic part"));
   for (const topic of item.topics || []) topics.append(textNode("span", topic, "topic"));
   body.append(topics);
   const examples = node("div", "examples");

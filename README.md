@@ -1,9 +1,16 @@
-# 听写辨音助手 v2.7.0
+# 听写辨音助手 v2.7.1
 
 这是为以下雅思听写页面定制的 Chrome / Edge 扩展：
 
 - `https://ielts.itongzhuo.com/business/ielts/student/jumpAnswerWordDictation.do`
 - `https://www.idictation.cn/home`
+
+## v2.7.1 词组发音引擎修复
+
+- 精听口语素材不再把网页 `speechSynthesis` 作为主发音引擎，改用 Chrome 扩展专用的 `chrome.tts`。
+- 根据插件中的英/美音设置明确筛选 `en-GB` 或 `en-US` 声音，并优先选择系统中质量较好的常见英语声音。
+- 播放、停止、被其他词组打断以及引擎报错都会正确恢复按钮，不再出现假播放或一直停留在“停止播放”的状态。
+- 浏览器不支持扩展 TTS 时，才回退到原网页语音能力。
 
 ## v2.7.0 精听口语素材
 

@@ -23,6 +23,7 @@ let favorites = [];
 let view = "result";
 let accent = "us";
 let activeSpeechButton = null;
+let activeSpeechRun = 0;
 
 initialize();
 
@@ -156,36 +157,100 @@ function renderExample(label, english, className = "", chinese = "") {
   return box;
 }
 
-function speakPhrase(phrase, button) {
-  if (!("speechSynthesis" in window)) return;
+async function speakPhrase(phrase, button) {
   if (activeSpeechButton === button && button.classList.contains("playing")) {
-    speechSynthesis.cancel();
-    button.classList.remove("playing");
-    button.textContent = "🔊 播放词组";
-    activeSpeechButton = null;
+    stopSpeaking();
     return;
   }
-  speechSynthesis.cancel();
+  stopSpeaking();
+  const run = ++activeSpeechRun;
+  activeSpeechButton = button;
+  button.classList.add("playing");
+  button.textContent = "■ 停止播放";
+  if (chrome.tts?.speak && chrome.tts?.getVoices) {
+    try {
+      const voices = await getChromeVoices();
+      if (run !== activeSpeechRun) return;
+      const voice = selectEnglishVoice(voices, accent);
+      const options = {
+        lang: accent === "uk" ? "en-GB" : "en-US",
+        rate: .82,
+        pitch: 1,
+        volume: 1,
+        enqueue: false,
+        onEvent: (event) => {
+          if (run !== activeSpeechRun) return;
+          if (["end", "error", "cancelled", "interrupted"].includes(event.type)) restoreSpeechButton(button, run);
+        }
+      };
+      if (voice?.voiceName) options.voiceName = voice.voiceName;
+      chrome.tts.speak(phrase, options, () => {
+        if (chrome.runtime.lastError) {
+          restoreSpeechButton(button, run);
+          speakWithWebFallback(phrase, button);
+        }
+      });
+      return;
+    } catch {
+      restoreSpeechButton(button, run);
+    }
+  }
+  speakWithWebFallback(phrase, button);
+}
+
+function getChromeVoices() {
+  return new Promise((resolve) => chrome.tts.getVoices((voices) => resolve(Array.isArray(voices) ? voices : [])));
+}
+
+function selectEnglishVoice(voices, selectedAccent) {
+  const lang = selectedAccent === "uk" ? "en-gb" : "en-us";
+  const preferred = selectedAccent === "uk"
+    ? ["daniel", "serena", "oliver", "google uk english"]
+    : ["samantha", "ava", "alex", "google us english"];
+  return [...voices]
+    .filter((voice) => String(voice.lang || "").toLowerCase().startsWith(lang))
+    .sort((left, right) => voiceScore(right, preferred) - voiceScore(left, preferred))[0] || null;
+}
+
+function voiceScore(voice, preferred) {
+  const name = String(voice.voiceName || "").toLowerCase();
+  const preferredIndex = preferred.findIndex((item) => name.includes(item));
+  return (preferredIndex < 0 ? 0 : 100 - preferredIndex * 10)
+    + (voice.remote === false ? 8 : 0)
+    + (Array.isArray(voice.eventTypes) && voice.eventTypes.includes("end") ? 4 : 0);
+}
+
+function stopSpeaking() {
+  activeSpeechRun += 1;
+  chrome.tts?.stop?.();
+  window.speechSynthesis?.cancel?.();
   if (activeSpeechButton) {
     activeSpeechButton.classList.remove("playing");
     activeSpeechButton.textContent = "🔊 播放词组";
+    activeSpeechButton = null;
   }
+}
+
+function restoreSpeechButton(button, run) {
+  if (run !== activeSpeechRun || activeSpeechButton !== button) return;
+  button.classList.remove("playing");
+  button.textContent = "🔊 播放词组";
+  activeSpeechButton = null;
+}
+
+function speakWithWebFallback(phrase, button) {
+  if (!("speechSynthesis" in window)) return;
+  const run = ++activeSpeechRun;
   const utterance = new SpeechSynthesisUtterance(phrase);
   utterance.lang = accent === "uk" ? "en-GB" : "en-US";
-  utterance.rate = .86;
+  utterance.rate = .82;
   const voice = speechSynthesis.getVoices().find((item) => item.lang.toLowerCase().startsWith(accent === "uk" ? "en-gb" : "en-us"));
   if (voice) utterance.voice = voice;
   activeSpeechButton = button;
   button.classList.add("playing");
   button.textContent = "■ 停止播放";
-  const restore = () => {
-    if (activeSpeechButton !== button) return;
-    button.classList.remove("playing");
-    button.textContent = "🔊 播放词组";
-    activeSpeechButton = null;
-  };
-  utterance.onend = restore;
-  utterance.onerror = restore;
+  utterance.onend = () => restoreSpeechButton(button, run);
+  utterance.onerror = () => restoreSpeechButton(button, run);
   speechSynthesis.speak(utterance);
 }
 

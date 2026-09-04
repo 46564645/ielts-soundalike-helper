@@ -1,5 +1,10 @@
 # 第三方组件与服务说明
 
+## Chrome TTS
+
+- 精听词组发音优先使用 Chrome 扩展原生 `chrome.tts` 接口及电脑中已经安装的英语声音，不会为了发音发送 DeepSeek API Key 或精听原文。
+- 浏览器不支持该接口时才回退到网页语音合成功能。
+
 ## DeepSeek API
 
 - 接口：`https://api.deepseek.com/chat/completions`

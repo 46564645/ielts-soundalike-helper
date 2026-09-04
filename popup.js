@@ -17,6 +17,8 @@ const deepseekApiKey = document.querySelector("#deepseek-api-key");
 const saveDeepseek = document.querySelector("#save-deepseek");
 const clearDeepseek = document.querySelector("#clear-deepseek");
 const deepseekStatus = document.querySelector("#deepseek-status");
+const extractSpeaking = document.querySelector("#extract-speaking");
+const speakingEntryStatus = document.querySelector("#speaking-entry-status");
 let savedTimer = 0;
 let hasDeepseekKey = false;
 
@@ -76,6 +78,7 @@ clearDeepseek.addEventListener("click", () => {
 reopen.addEventListener("click", () => {
   chrome.storage.sync.set({ overlayReopenNonce: Date.now() }, () => showSaved("已请求重新显示"));
 });
+extractSpeaking.addEventListener("click", extractSpeakingMaterial);
 
 function persist() {
   const accent = accents.find((input) => input.checked)?.value === "uk" ? "uk" : "us";
@@ -101,4 +104,85 @@ function showSaved(message) {
   saved.textContent = message;
   saved.classList.add("show");
   savedTimer = window.setTimeout(() => saved.classList.remove("show"), 1500);
+}
+
+async function extractSpeakingMaterial() {
+  setSpeakingStatus("正在读取当前精听页面…");
+  extractSpeaking.disabled = true;
+  try {
+    if (!deepseekEnabled.checked || !hasDeepseekKey) {
+      throw new Error("请先启用 DeepSeek 并保存 API Key");
+    }
+    const [tab] = await queryActiveTab();
+    if (!tab?.id || !isSupportedLearningUrl(tab.url)) {
+      throw new Error("请先打开同桌雅思或爱听写的精听页面");
+    }
+    const page = await sendTabMessage(tab.id, { type: "COLLECT_INTENSIVE_LISTENING_TEXT" });
+    if (!page?.ok) throw new Error(page?.error || "未能读取页面，请刷新精听页后再试");
+    if (String(page.text || "").length < 120) {
+      throw new Error("当前页面文字太少，请先打开文章/字幕内容");
+    }
+    const job = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      status: "queued",
+      createdAt: Date.now(),
+      page: {
+        title: String(page.title || tab.title || "精听页面").slice(0, 180),
+        url: String(page.url || tab.url || ""),
+        text: String(page.text || "").slice(0, 60000),
+        originalCharCount: Number(page.originalCharCount || String(page.text || "").length),
+        segmentCount: Number(page.segmentCount || 0),
+        truncated: Boolean(page.truncated)
+      }
+    };
+    await setLocal({ speakingExtractionJobV1: job });
+    setSpeakingStatus(`已读取 ${job.page.originalCharCount.toLocaleString()} 字，正在打开分析页`, "ready");
+    chrome.tabs.create({ url: chrome.runtime.getURL(`speaking.html?job=${encodeURIComponent(job.id)}`) });
+    window.setTimeout(() => window.close(), 250);
+  } catch (error) {
+    setSpeakingStatus(error instanceof Error ? error.message : "读取失败，请重试", "error");
+    extractSpeaking.disabled = false;
+  }
+}
+
+function isSupportedLearningUrl(url) {
+  try {
+    const hostname = new URL(url).hostname;
+    return hostname === "www.idictation.cn" || hostname === "ielts.itongzhuo.com";
+  } catch {
+    return false;
+  }
+}
+
+function queryActiveTab() {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+      else resolve(tabs);
+    });
+  });
+}
+
+function sendTabMessage(tabId, message) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      if (chrome.runtime.lastError) reject(new Error("插件尚未接入此页面，请刷新精听页后再试"));
+      else resolve(response);
+    });
+  });
+}
+
+function setLocal(value) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.set(value, () => {
+      if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+      else resolve();
+    });
+  });
+}
+
+function setSpeakingStatus(message, state = "") {
+  speakingEntryStatus.textContent = message;
+  speakingEntryStatus.classList.toggle("error", state === "error");
+  speakingEntryStatus.classList.toggle("ready", state === "ready");
 }

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>精听口语素材 · 听写辨音助手</title>
+  <link rel="stylesheet" href="speaking.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="popup.html" aria-label="听写辨音助手设置"><span>Aa</span><div><strong>精听口语素材</strong><small>Listening → Speaking</small></div></a>
+    <div class="model-badge"><i></i> DeepSeek V4 Pro · 标准分析</div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <span class="eyebrow">从真实语境积累，而不是背孤立单词</span>
+        <h1>把精听原文变成<br><em>能说出口</em>的表达</h1>
+        <p id="source-meta">正在读取本次精听任务…</p>
+      </div>
+      <div class="hero-stat" aria-label="素材统计">
+        <strong id="phrase-count">—</strong><span>精选词组</span>
+        <b id="text-count">— 字原文</b>
+      </div>
+    </section>
+
+    <section id="status-panel" class="status-panel" aria-live="polite">
+      <div class="spinner" aria-hidden="true"></div>
+      <div><strong id="status-title">正在分析精听原文</strong><p id="status-copy">会优先筛选自然、可迁移的雅思口语词组，通常需要几十秒。</p></div>
+      <button id="retry" type="button" hidden>重新分析</button>
+    </section>
+
+    <section id="result-shell" class="result-shell" hidden>
+      <div class="toolbar">
+        <div class="tabs" role="tablist">
+          <button class="active" data-view="result" role="tab" aria-selected="true">本次提取 <span id="result-count">0</span></button>
+          <button data-view="favorites" role="tab" aria-selected="false">我的收藏 <span id="favorite-count">0</span></button>
+        </div>
+        <label class="search"><span>⌕</span><input id="search" type="search" placeholder="搜索词组、含义或话题"></label>
+      </div>
+      <div id="summary" class="summary"></div>
+      <div id="phrase-list" class="phrase-list"></div>
+      <div id="empty" class="empty" hidden><strong>这里还没有内容</strong><p>收藏喜欢的词组后，它们会一直保存在本机。</p></div>
+    </section>
+  </main>
+  <footer>原文仅在你点击“开始提取”后发送给 DeepSeek · API Key 与收藏保存在本机</footer>
+  <script src="speaking.js"></script>
+</body>
+</html>

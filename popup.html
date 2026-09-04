@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>听写辨音助手</title>
   <link rel="stylesheet" href="popup.css">
+  <link rel="stylesheet" href="popup-extra.css">
 </head>
 <body>
   <main>
@@ -50,6 +51,18 @@
         </div>
         <small id="deepseek-status" class="deepseek-status">尚未配置</small>
       </section>
+      <section class="speaking-entry" aria-labelledby="speaking-entry-title">
+        <div class="speaking-entry-copy">
+          <span class="speaking-kicker">精听 → 口语素材</span>
+          <strong id="speaking-entry-title">提取当前页面的实用词组</strong>
+          <small>读取正文与字幕，分析用法、雅思话题和例句</small>
+        </div>
+        <div class="speaking-entry-actions">
+          <span>deepseek-v4-pro · 标准分析</span>
+          <button id="extract-speaking" type="button">开始提取</button>
+        </div>
+        <small id="speaking-entry-status" class="speaking-entry-status" aria-live="polite">请先打开精听页面</small>
+      </section>
       <div class="learning-summary"><strong>音标—错误字母映射记录</strong><span id="learning-stats">尚无错题记录</span><small>记录哪个声音被写成了哪个错误字母</small></div>
       <div class="corpus"><strong>本地雅思词库 4148 条</strong><span>答案词 1746 · 核心词 1950 · 场景词 10 类</span></div>
     </section>
@@ -60,7 +73,7 @@
     <button id="reopen" class="reopen" type="button">重新显示已关闭的面板</button>
     <a class="open-page" href="https://ielts.itongzhuo.com/business/ielts/student/jumpAnswerWordDictation.do?sSubjects=0&amp;leftType=1" target="_blank" rel="noreferrer">打开同桌雅思 <span>→</span></a>
     <a class="open-page" href="https://www.idictation.cn/home" target="_blank" rel="noreferrer">打开爱听写 <span>→</span></a>
-    <p class="privacy">拼写过程中不会显示答案提示。错误映射和 API Key 只保存在本机浏览器；启用 DeepSeek 后，仅发送当前单词及本地中文释义，不发送你的拼写答案。</p>
+    <p class="privacy">拼写过程中不会显示答案提示。错误映射、收藏和 API Key 只保存在本机浏览器。词汇解释仅发送当前单词；“精听口语素材”只有在你点击开始后，才会把当前页提取到的正文/字幕发送给 DeepSeek。</p>
     <div id="saved" class="saved" aria-live="polite">设置已保存</div>
   </main>
   <script src="popup.js"></script>

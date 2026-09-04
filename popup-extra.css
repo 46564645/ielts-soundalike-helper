@@ -1,0 +1,17 @@
+.speaking-entry {
+  padding: 12px 14px;
+  border-bottom: 1px solid #edf0f5;
+  background: linear-gradient(135deg, #f5f7ff 0%, #fff 72%);
+}
+.speaking-entry-copy { display: grid; gap: 3px; }
+.speaking-kicker { color: #526bd0; font-size: 9px; font-weight: 900; letter-spacing: .04em; }
+.speaking-entry-copy strong { font-size: 12px; }
+.speaking-entry-copy small { color: #7e899a; font-size: 9px; }
+.speaking-entry-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; }
+.speaking-entry-actions span { color: #60709b; font-size: 9px; }
+.speaking-entry-actions button { height: 31px; padding: 0 13px; border: 0; border-radius: 8px; background: #526bd0; color: #fff; font-size: 10px; font-weight: 800; cursor: pointer; }
+.speaking-entry-actions button:hover { background: #445dbd; }
+.speaking-entry-actions button:disabled { cursor: wait; opacity: .62; }
+.speaking-entry-status { display: block; margin-top: 6px; color: #7e899a; font-size: 9px; }
+.speaking-entry-status.error { color: #b53b35; }
+.speaking-entry-status.ready { color: #087f5b; }

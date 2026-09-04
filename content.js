@@ -57,6 +57,16 @@
   document.addEventListener("keydown", handleKeydown, true);
   window.addEventListener("resize", () => overlayHost && clampHostPosition());
 
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type !== "COLLECT_INTENSIVE_LISTENING_TEXT") return false;
+    try {
+      sendResponse({ ok: true, ...collectIntensiveListeningText() });
+    } catch (error) {
+      sendResponse({ ok: false, error: error instanceof Error ? error.message : "页面文字读取失败" });
+    }
+    return false;
+  });
+
   const observer = new MutationObserver(() => {
     queuePrefetch();
   });
@@ -1350,6 +1360,95 @@
 
   function textOf(node) {
     return String(node?.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function collectIntensiveListeningText() {
+    const captured = readCapturedIdictationTranscript();
+    if (captured) return captured;
+    const transcriptSelectors = [
+      '[data-transcript]',
+      '[class*="transcript" i]',
+      '[class*="subtitle" i]',
+      '[class*="sentence" i]',
+      '[class*="paragraph" i]',
+      '[class*="essay-content" i]',
+      '[class*="article-content" i]'
+    ];
+    const candidates = [...document.querySelectorAll(transcriptSelectors.join(","))]
+      .filter((node) => isVisibleTextContainer(node) && !node.closest("ielts-soundalike-helper"));
+    let lines = normalizePageLines(candidates.map((node) => node.innerText).join("\n"));
+    if (lines.join("\n").length < 120) {
+      const root = document.querySelector("main") || document.body;
+      lines = normalizePageLines(root?.innerText || "");
+    }
+
+    const cueLines = [];
+    for (const media of document.querySelectorAll("audio,video")) {
+      for (const track of media.textTracks || []) {
+        try {
+          for (const cue of track.cues || []) cueLines.push(String(cue.text || ""));
+        } catch {
+          // Some cross-origin text tracks do not expose their cue list.
+        }
+      }
+    }
+    lines = normalizePageLines([...lines, ...cueLines].join("\n"));
+    const completeText = lines.join("\n");
+    const limit = 60000;
+    return {
+      title: document.title || "精听页面",
+      url: location.href,
+      text: completeText.slice(0, limit),
+      originalCharCount: completeText.length,
+      segmentCount: lines.length,
+      truncated: completeText.length > limit
+    };
+  }
+
+  function readCapturedIdictationTranscript() {
+    if (!IS_IDICTATION) return null;
+    const serialized = document.documentElement?.getAttribute("data-ielts-speaking-transcript");
+    if (!serialized) return null;
+    try {
+      const payload = JSON.parse(serialized);
+      const sentences = Array.isArray(payload?.sentences) ? payload.sentences : [];
+      const lines = normalizePageLines(sentences.flatMap((item) => [item?.content, item?.translate]).filter(Boolean).join("\n"));
+      const completeText = lines.join("\n");
+      if (completeText.length < 120) return null;
+      return {
+        title: document.title || "爱听写精听",
+        url: location.href,
+        text: completeText.slice(0, 60000),
+        originalCharCount: completeText.length,
+        segmentCount: sentences.length,
+        truncated: completeText.length > 60000,
+        source: "article-response"
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function isVisibleTextContainer(node) {
+    if (!(node instanceof HTMLElement)) return false;
+    const style = getComputedStyle(node);
+    const rect = node.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+  }
+
+  function normalizePageLines(value) {
+    const seen = new Set();
+    const noise = new Set(["首页", "学习", "词书", "登录", "注册", "上一页", "下一页", "播放", "暂停", "返回"]);
+    const output = [];
+    for (const rawLine of String(value || "").normalize("NFKC").split(/\n+/)) {
+      const line = rawLine.replace(/[\t ]+/g, " ").trim();
+      if (!line || noise.has(line) || line.length > 4000) continue;
+      const key = line.toLocaleLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      output.push(line);
+    }
+    return output;
   }
 
   function sendMessage(message) {

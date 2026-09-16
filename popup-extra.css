@@ -15,3 +15,6 @@
 .speaking-entry-status { display: block; margin-top: 6px; color: #7e899a; font-size: 9px; }
 .speaking-entry-status.error { color: #b53b35; }
 .speaking-entry-status.ready { color: #087f5b; }
+.sound-favorites-link { border-color: #eee1b3; background: linear-gradient(135deg, #fffaf0, #fff); }
+.sound-favorites-link b { color: #b57a00; }
+.sound-favorites-link:hover { border-color: #e3c76b; background: #fff8df; }

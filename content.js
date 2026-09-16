@@ -4,6 +4,7 @@
   const P = globalThis.IeltsPhonetics;
   const IS_IDICTATION = location.hostname === "www.idictation.cn";
   const COMPARISONS_KEY = "pronunciationComparisonsV1";
+  const SOUND_FAVORITES_KEY = "soundSpellingFavoritesV1";
   const DEFAULTS = { enabled: true, accent: "us", overlayReopenNonce: 0 };
   let settings = { ...DEFAULTS };
   let prepared = null;
@@ -30,6 +31,14 @@
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes[SOUND_FAVORITES_KEY] && lastResult && !closedForSession) {
+      sendMessage({ type: "GET_LEARNING_STATE" }).then((learning) => {
+        if (!learning?.ok || !lastResult || closedForSession) return;
+        lastResult.learning = learning;
+        if (lastResult.analysis) lastResult.analysis.learning = learning;
+        renderResult(lastResult);
+      }).catch(() => {});
+    }
     if (area !== "sync") return;
     if (changes.enabled) {
       settings.enabled = changes.enabled.newValue !== false;
@@ -425,9 +434,7 @@
           type: "ANALYZE_ATTEMPT",
           typed: attempt.typed,
           correct: attempt.details.word,
-          accent: settings.accent,
-          record: true,
-          attemptKey: `${attempt.id}:${attempt.details.word}:${attempt.typed}:${Date.now()}`
+          accent: settings.accent
         }).catch(() => ({ ok: false }));
       }
       lastResult.learning = lastResult.analysis?.learning || await sendMessage({ type: "GET_LEARNING_STATE" }).catch(() => null);
@@ -451,7 +458,7 @@
       if (token !== renderSequence || !lastResult) return;
       lastResult.package = wordPackage;
       if (state === "incorrect" && attempt.typed && !sameWord(attempt.typed, attempt.details.word)) {
-        lastResult.analysis = await sendMessage({ type: "ANALYZE_ATTEMPT", typed: attempt.typed, correct: attempt.details.word, accent: settings.accent, record: false }).catch(() => ({ ok: false }));
+        lastResult.analysis = await sendMessage({ type: "ANALYZE_ATTEMPT", typed: attempt.typed, correct: attempt.details.word, accent: settings.accent }).catch(() => ({ ok: false }));
       }
       lastResult.learning = lastResult.analysis?.learning || await sendMessage({ type: "GET_LEARNING_STATE" }).catch(() => null);
       if (token === renderSequence && !closedForSession) renderResult(lastResult);
@@ -594,32 +601,23 @@
       return;
     }
     container.hidden = false;
-    const title = element("h3", "听音拼写纠错");
-    container.append(title);
+    const heading = element("div", "", "analysis-heading");
+    heading.append(
+      element("h3", "按声音拼写"),
+      element("p", "训练路径：听发音 → 找字母块 → 合成单词，不从中文释义回忆拼写。", "analysis-principle")
+    );
+    container.append(heading);
     const analysis = result.analysis;
     if (!analysis?.ok || !analysis.available) {
       container.append(element("div", "正在建立声音—字母对齐……", "loading"));
       return;
     }
-    const spelling = element("div", "", "spelling-compare");
-    const typedLine = element("div", "", "compare-line");
-    typedLine.append(element("span", "你写的", "compare-label"), renderCharacterLine(analysis.spelling.parts, "typed"));
-    const correctLine = element("div", "", "compare-line");
-    correctLine.append(element("span", "正确词", "compare-label"), renderCharacterLine(analysis.spelling.parts, "correct"));
-    spelling.append(typedLine, correctLine);
-    container.append(spelling);
-
     const soundSpelling = analysis.soundSpelling;
     if (!soundSpelling?.blocks?.length) {
       container.append(element("p", "未取得可靠的正确读音，本题暂时只显示字母差异。", "muted"));
       return;
     }
-    const pronunciation = element("div", "", "correct-pronunciation");
-    pronunciation.append(element("span", "你听到的声音", "compare-label"));
-    const correctIpa = element("div", "", "ipa large");
-    renderIpa(correctIpa, P.tokenizeIpa(analysis.correctIpa).map((token) => ({ token, different: false })), settings.accent);
-    pronunciation.append(correctIpa, audioButton(analysis.correctAudio, analysis.correct));
-    container.append(pronunciation, renderSoundGrid(soundSpelling.blocks));
+    container.append(renderSpellingRoute(analysis, soundSpelling, result.learning || analysis.learning));
 
     const legend = element("div", "", "alignment-legend");
     legend.append(legendItem("正确对应", "correct"), legendItem("错误字母", "error"), legendItem("漏写部分", "missing"));
@@ -638,22 +636,158 @@
     if (issues.childElementCount) container.append(issues);
   }
 
-  function renderSoundGrid(blocks) {
-    const grid = element("div", "", "sound-grid");
-    const header = element("div", "", "sound-row sound-header");
-    header.append(element("span", "声音"), element("span", "正确拼写"), element("span", "你的写法"));
-    grid.append(header);
-    for (const block of blocks || []) {
-      const row = element("div", "", `sound-row ${block.status}`);
-      const soundButton = element("button", block.sound, "sound-block-button");
-      soundButton.type = "button";
-      soundButton.title = block.phonemes?.length ? `播放 ${block.sound}` : "静音字母没有独立发音";
-      soundButton.disabled = !block.phonemes?.length;
-      soundButton.addEventListener("click", () => playPhonemeSequence(block.phonemes));
-      row.append(soundButton, renderAlignmentParts(block.correctParts), renderAlignmentParts(block.typedParts));
-      grid.append(row);
+  function renderSpellingRoute(analysis, soundSpelling, learning) {
+    const route = element("div", "", "spelling-route");
+    const savedIds = new Set(learning?.profile?.favoriteIds || []);
+
+    const listenStep = spellingStep("1", "先听完整发音");
+    const pronunciation = element("div", "", "route-pronunciation");
+    const correctIpa = element("div", "", "ipa large");
+    renderIpa(correctIpa, P.tokenizeIpa(analysis.correctIpa).map((token) => ({ token, different: false })), settings.accent);
+    const playWord = audioButton(analysis.correctAudio, analysis.correct);
+    playWord.title = `播放 ${analysis.correct} 的完整发音；先只听，不看中文释义`;
+    pronunciation.append(correctIpa, playWord);
+    listenStep.body.append(pronunciation);
+
+    const mappingStep = spellingStep("2", "把发音对应到字母块");
+    const mappings = element("div", "", "sound-mapping-list");
+    for (const block of soundSpelling.blocks || []) mappings.append(renderSoundMapping(block, analysis, savedIds));
+    mappingStep.body.append(mappings);
+    const uncertainBlocks = soundSpelling.blocks.filter((block) => block.confidence !== "mapped");
+    if (uncertainBlocks.length) {
+      mappingStep.body.append(element(
+        "p",
+        `其中 ${uncertainBlocks.length} 个块属于本词估算或不发音字母，需要结合这个词整体记忆，不要当成唯一拼写规则。`,
+        "mapping-caution"
+      ));
     }
-    return grid;
+
+    const assemblyStep = spellingStep("3", "按顺序合成完整单词");
+    assemblyStep.body.append(
+      renderAssemblyLine("正确路径", soundSpelling.blocks, "correct", soundSpelling.correct),
+      renderAssemblyLine("你的路径", soundSpelling.blocks, "typed", soundSpelling.typed)
+    );
+    const correctBlocks = soundSpelling.blocks.filter((block) => block.status === "correct").length;
+    const focus = element(
+      "p",
+      `已对应 ${correctBlocks}/${soundSpelling.blocks.length} 个声音块；下一次听写只重点留意标红的块。`,
+      "route-focus"
+    );
+    assemblyStep.body.append(focus);
+
+    route.append(listenStep.root, mappingStep.root, assemblyStep.root);
+    return route;
+  }
+
+  function spellingStep(number, title) {
+    const root = element("section", "", "spelling-step");
+    const heading = element("div", "", "spelling-step-heading");
+    heading.append(element("span", number, "step-number"), element("strong", title));
+    const body = element("div", "", "spelling-step-body");
+    root.append(heading, body);
+    return { root, body };
+  }
+
+  function renderSoundMapping(block, analysis, savedIds) {
+    const confidence = block.confidence || "unknown";
+    const mapping = element(
+      "div",
+      "",
+      `sound-mapping ${block.status === "correct" ? "correct" : "needs-work"} confidence-${confidence}`
+    );
+    const soundButton = element("button", block.sound, "mapping-sound");
+    soundButton.type = "button";
+    soundButton.title = block.phonemes?.length
+      ? `播放 ${block.sound}`
+      : confidence === "unknown" ? "当前没有可靠音标" : "静音字母没有独立发音";
+    soundButton.disabled = !block.phonemes?.length;
+    soundButton.addEventListener("click", () => playPhonemeSequence(block.phonemes));
+    const arrow = element("span", "→", "mapping-arrow");
+    const correct = element("div", "", "mapping-correct");
+    correct.append(renderAlignmentParts(block.correctParts));
+    mapping.append(soundButton, arrow, correct);
+    if (block.phonemes?.length && block.correct) {
+      mapping.classList.add("has-favorite");
+      const id = soundSpellingFavoriteId(block.phonemes, block.correct, analysis.correct);
+      const star = element("button", "", "sound-favorite");
+      star.type = "button";
+      star.dataset.favoriteId = id;
+      setSoundFavoriteState(star, savedIds.has(id), block.sound, block.correct);
+      star.addEventListener("click", () => toggleSoundSpellingFavorite(star, block, analysis));
+      mapping.append(star);
+    }
+    if (confidence !== "mapped") mapping.append(element("small", mappingConfidenceLabel(confidence), "mapping-confidence"));
+    if (block.status !== "correct") {
+      const typed = element("div", "", "mapping-typed");
+      typed.append(element("small", "你写"), renderAlignmentParts(block.typedParts));
+      mapping.append(typed);
+    }
+    return mapping;
+  }
+
+  function soundSpellingFavoriteId(phonemes, grapheme, word) {
+    return [(phonemes || []).join(" "), P.normalizeWord(grapheme), P.normalizeWord(word)]
+      .map((part) => encodeURIComponent(part))
+      .join("|");
+  }
+
+  function setSoundFavoriteState(button, saved, sound, grapheme) {
+    button.dataset.saved = saved ? "true" : "false";
+    button.textContent = saved ? "★" : "☆";
+    button.classList.toggle("saved", saved);
+    button.setAttribute("aria-pressed", saved ? "true" : "false");
+    button.setAttribute("aria-label", `${saved ? "取消收藏" : "收藏"} ${sound} → ${grapheme}`);
+    button.title = button.getAttribute("aria-label");
+    button.disabled = false;
+  }
+
+  async function toggleSoundSpellingFavorite(button, block, analysis) {
+    if (button.disabled || !block.phonemes?.length || !block.correct || !analysis?.correct) return;
+    const wasSaved = button.dataset.saved === "true";
+    button.disabled = true;
+    button.textContent = "…";
+    const response = await sendMessage({
+      type: "TOGGLE_SOUND_SPELLING_FAVORITE",
+      favorite: {
+        sound: block.sound,
+        phonemes: block.phonemes,
+        grapheme: block.correct,
+        word: analysis.correct,
+        ipa: analysis.correctIpa,
+        accent: settings.accent
+      }
+    }).catch(() => null);
+    if (!response?.ok) {
+      setSoundFavoriteState(button, wasSaved, block.sound, block.correct);
+      return;
+    }
+    if (lastResult) {
+      lastResult.learning = response.learning;
+      if (lastResult.analysis) lastResult.analysis.learning = response.learning;
+      renderResult(lastResult);
+    }
+  }
+
+  function mappingConfidenceLabel(confidence) {
+    if (confidence === "silent") return "不单独发音";
+    if (confidence === "unmapped") return "需整体记忆";
+    if (confidence === "estimated") return "本词估算";
+    return "音标缺失";
+  }
+
+  function renderAssemblyLine(label, blocks, side, word) {
+    const line = element("div", "", `assembly-line ${side}`);
+    line.append(element("span", label, "assembly-label"));
+    const chunks = element("div", "", "assembly-chunks");
+    for (const block of blocks || []) {
+      if (chunks.childElementCount) chunks.append(element("span", "+", "assembly-plus"));
+      const value = side === "correct" ? block.correct : block.typed;
+      const state = block.status === "correct" ? "correct" : side === "correct" ? "expected" : "error";
+      chunks.append(element("b", value || "∅", `assembly-chunk ${state}`));
+    }
+    chunks.append(element("span", "=", "assembly-equals"), element("strong", word || "∅", "assembly-word"));
+    line.append(chunks);
+    return line;
   }
 
   function renderAlignmentParts(parts) {
@@ -666,21 +800,6 @@
     const item = element("span", "", "legend-item");
     item.append(element("i", "", `legend-dot ${state}`), document.createTextNode(label));
     return item;
-  }
-
-  function renderCharacterLine(parts, side) {
-    const line = element("strong", "", "character-line");
-    for (const part of parts || []) {
-      const value = side === "typed" ? part.typed : part.correct;
-      if (!value) {
-        const gap = element("span", "∅", "char changed gap");
-        gap.title = side === "typed" ? "这里漏写了字母" : "这里多写了字母";
-        line.append(gap);
-      } else {
-        line.append(element("span", value, part.type === "equal" ? "char" : `char changed ${part.type}`));
-      }
-    }
-    return line;
   }
 
   function renderDeepseek(container, response) {
@@ -839,44 +958,45 @@
     container.hidden = false;
     const heading = element("div", "", "learning-heading");
     heading.append(
-      element("strong", "音标—错误字母映射记录"),
-      element("span", `${learning.profile.patternCount || 0} 类 · ${learning.profile.totalIncorrectAttempts || 0} 次错答`, "learning-total")
+      element("strong", "我的音标对应排行"),
+      element(
+        "span",
+        `${learning.profile.mappingCount || 0} 组对应 · ${learning.profile.favoriteCount || 0} 个收藏词`,
+        "learning-total"
+      )
     );
     container.append(heading);
 
-    const weaknessMatches = result.package?.target?.weaknessMatches || [];
-    if (weaknessMatches.length) {
-      const alert = element("div", "", "weakness-match");
-      alert.append(element("strong", "本词命中你的历史弱项"));
-      alert.append(element("span", weaknessMatches.map((match) => `${match.sound}：应写 ${match.correctGrapheme}（${match.count}次）`).join(" · ")));
-      container.append(alert);
-    }
-
-    const patterns = element("div", "", "pattern-list");
-    const topPatterns = learning.profile.topPatterns || [];
-    if (!topPatterns.length) {
-      patterns.append(element("p", "完成一次错题后，这里会记录“哪个声音被写成了哪个错误字母”。", "muted compact"));
+    const rankingList = element("div", "", "sound-ranking-list");
+    const ranking = learning.profile.ranking || [];
+    if (!ranking.length) {
+      rankingList.append(element("p", "点击声音—字母块右上角的 ☆，这里会按收藏单词数生成排行。", "muted compact"));
     } else {
-      for (const pattern of topPatterns.slice(0, 5)) {
-        const item = element("article", "", "pattern-item");
-        const mapping = element("div", "", "pattern-mapping");
-        mapping.append(
-          element("strong", pattern.sound || "声音", "pattern-sound"),
-          element("span", `正确：${pattern.correctGrapheme || "—"}`, "pattern-correct"),
-          element("span", `你写成：${pattern.userGrapheme || "漏写"}`, "pattern-wrong")
+      for (const [index, itemData] of ranking.entries()) {
+        const item = element("article", "", "sound-ranking-item");
+        item.append(element("span", String(index + 1), "ranking-index"));
+        const mapping = element("div", "", "ranking-mapping");
+        const soundButton = element("button", itemData.sound || "音标", "ranking-sound");
+        soundButton.type = "button";
+        soundButton.title = `播放 ${itemData.sound || "这个音标"}`;
+        soundButton.addEventListener("click", () => playPhonemeSequence(itemData.phonemes));
+        mapping.append(soundButton, element("span", "→", "ranking-arrow"), element("strong", itemData.grapheme, "ranking-grapheme"));
+        const details = element("div", "", "ranking-details");
+        const words = (itemData.words || []).map((item) => item.word).filter(Boolean).slice(0, 4);
+        details.append(
+          element("b", `${itemData.count || 0} 个词`, "ranking-count"),
+          element("small", words.join(" · ") || "暂无单词")
         );
-        const meta = element("div", "", "pattern-meta");
-        meta.append(element("b", `${pattern.count || 0} 次`, "pattern-count"));
-        const exampleWords = (pattern.words || pattern.examples || [])
-          .map((entry) => typeof entry === "string" ? entry : entry?.correct)
-          .filter(Boolean)
-          .slice(0, 3);
-        if (exampleWords.length) meta.append(element("small", exampleWords.join(" · ")));
-        item.append(mapping, meta);
-        patterns.append(item);
+        item.append(mapping, details);
+        rankingList.append(item);
       }
     }
-    container.append(patterns);
+    const openFavorites = element("button", "查看音标对应收藏 →", "open-sound-favorites");
+    openFavorites.type = "button";
+    openFavorites.addEventListener("click", () => {
+      sendMessage({ type: "OPEN_SOUND_SPELLING_FAVORITES" }).catch(() => null);
+    });
+    container.append(rankingList, openFavorites);
   }
 
   function renderCandidates(container, countNode, packet, excludedCurrentKey, typedCandidateResponse) {
@@ -1476,12 +1596,12 @@
       .body{flex:1;min-height:0;overflow:auto;padding:14px;background:#f6f8fc}.result-line{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}.status,.accent,.candidate-count,.book-badge,.book,.match-badge,.priority-badge{display:inline-flex;align-items:center;border-radius:99px;font-weight:700}.status{font-size:13px;padding:5px 10px}.status.correct{color:#087f5b;background:#dff7ed}.status.incorrect{color:#c92a2a;background:#ffe3e3}.status.protected{color:#5f3dc4;background:#eee9ff}.accent{font-size:12px;color:#57657b;background:#e9eef6;padding:4px 9px}
       .target-card,.analysis,.plural,.deepseek,.learning,.candidate-card{background:#fff;border:1px solid #e7ebf2;border-radius:14px}.target-card{padding:14px}.target-top,.candidate-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.word-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.word{font-size:28px;line-height:1.15;color:#131b2d}.book{font-size:11px;padding:3px 7px;color:#52627a;background:#edf1f7}.meaning{margin:8px 0 0;font-size:14px;color:#33415c;line-height:1.55}.attempt{margin:8px 0 0;padding-top:8px;border-top:1px dashed #e6eaf0;font-size:12px;color:#68768d}
       .audio-button{min-width:42px;height:34px;flex:0 0 auto;padding:0 6px;border:1px solid #ffd1ce;border-radius:10px;background:#fff2f1;display:inline-flex;align-items:center;justify-content:center;gap:3px;cursor:pointer}.audio-button:hover{background:#ffe2df}.audio-button:disabled{opacity:.45;cursor:not-allowed}.shortcut-key{min-width:15px;height:16px;padding:0 3px;border:1px solid #e4aaa6;border-bottom-width:2px;border-radius:4px;background:#fff;color:#a43a35;font:700 10px/14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-align:center}.ipa{display:flex;align-items:baseline;flex-wrap:wrap;color:#172033;font-family:"Segoe UI",Arial,sans-serif;font-size:27px;line-height:1.3;margin-top:3px}.ipa-token{padding:0 1px;border:0;background:transparent;color:inherit;font:inherit;line-height:inherit;cursor:pointer;border-radius:4px}.ipa-token:hover{background:#fff0ef;color:#ff4f48}.ipa-token.different{color:#e03131;font-weight:900;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px}.ipa.large{font-size:22px;margin:0;flex:1}.target-ipa{font-size:28px}
-      .analysis{margin-top:12px;padding:13px}.analysis h3{font-size:14px;margin:0 0 9px}.spelling-compare{display:grid;gap:6px}.compare-line,.correct-pronunciation{display:flex;align-items:center;gap:8px;min-height:30px}.correct-pronunciation{margin-top:10px;padding-top:10px;border-top:1px dashed #e1e6ee}.compare-label{width:68px;flex:0 0 68px;font-size:11px;color:#738198}.character-line{display:flex;font-size:20px;letter-spacing:1px}.char{min-width:14px;text-align:center}.char.changed{color:#e03131;font-weight:900;background:#fff0ef;border-radius:4px}.char.gap{font-size:13px;align-self:center}.muted{font-size:12px;color:#7b879a}.muted.compact{margin:5px 0}.loading,.empty{padding:18px;text-align:center;color:#7b8799;font-size:13px;background:#fff;border:1px dashed #d9e0eb;border-radius:12px}
-      .sound-grid{margin-top:11px;border:1px solid #e1e6ee;border-radius:11px;overflow:hidden}.sound-row{display:grid;grid-template-columns:minmax(72px,.85fr) 1fr 1fr;align-items:stretch}.sound-row+ .sound-row{border-top:1px solid #edf0f5}.sound-header{background:#f3f6fa;color:#65738a;font-size:10px;font-weight:800}.sound-row>span,.sound-row>.sound-block-button{min-width:0;padding:8px 7px;border:0;border-right:1px solid #edf0f5;background:transparent;text-align:center}.sound-row>*:last-child{border-right:0}.sound-block-button{color:#3356a8;font-weight:900;cursor:pointer}.sound-block-button:hover{background:#edf2ff}.sound-block-button:disabled{color:#8b95a5;cursor:default}.alignment-cell{display:flex!important;align-items:center;justify-content:center;gap:1px;font-size:17px}.alignment-part{min-width:12px;padding:2px 1px;border-radius:4px}.alignment-part.correct{color:#087f5b;background:#e6fcf5}.alignment-part.error,.alignment-part.extra{color:#c92a2a;background:#fff0f0}.alignment-part.missing{color:#9a6700;background:#fff3bf}.alignment-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;color:#6b778d;font-size:10px}.legend-item{display:inline-flex;align-items:center;gap:4px}.legend-dot{width:9px;height:9px;border-radius:3px}.legend-dot.correct{background:#63d5ad}.legend-dot.error{background:#ff8787}.legend-dot.missing{background:#ffd43b}
+      .analysis{margin-top:12px;padding:13px}.analysis-heading h3{font-size:15px;margin:0}.analysis-principle{margin:4px 0 0;color:#5f6e83;font-size:11px;line-height:1.5}.spelling-route{display:grid;gap:9px;margin-top:11px}.spelling-step{border:1px solid #e5eaf2;border-radius:11px;background:#fbfcfe;overflow:hidden}.spelling-step-heading{display:flex;align-items:center;gap:7px;padding:7px 9px;background:#f3f6fa;color:#35435a;font-size:11px}.step-number{display:inline-grid;place-items:center;width:19px;height:19px;border-radius:50%;background:#4058a9;color:#fff;font-size:10px;font-weight:900}.spelling-step-body{padding:9px}.route-pronunciation{display:flex;align-items:center;gap:8px}.sound-mapping-list{display:flex;align-items:stretch;gap:6px;flex-wrap:wrap;padding:1px}.sound-mapping{position:relative;display:grid;grid-template-columns:auto auto auto;grid-template-rows:auto auto;align-items:center;justify-content:center;gap:2px 5px;min-width:82px;padding:8px 7px 7px;border:1px solid #cfe8de;border-radius:9px;background:#f4fcf8}.sound-mapping.needs-work{border-color:#ffb8b2;background:#fff6f5}.sound-mapping.confidence-estimated,.sound-mapping.confidence-unmapped,.sound-mapping.confidence-unknown{border-style:dashed;border-color:#e6b15a;background:#fffaf0}.sound-mapping.confidence-silent{border-style:dashed;border-color:#cbd2dd;background:#f8f9fb}.mapping-sound{padding:2px 4px;border:0;border-radius:5px;background:transparent;color:#3158a6;font-size:15px;font-weight:900;cursor:pointer}.mapping-sound:hover{background:#e7edff}.mapping-sound:disabled{color:#8792a3;cursor:default}.mapping-arrow{color:#8b95a5;font-size:12px}.mapping-correct .alignment-cell{font-size:17px}.mapping-typed{grid-column:1/-1;display:flex;align-items:center;justify-content:center;gap:4px;margin-top:3px;padding-top:4px;border-top:1px dashed rgba(201,42,42,.2)}.mapping-typed>small{color:#9b5050;font-size:8px}.mapping-confidence{grid-column:1/-1;justify-self:center;margin-top:2px;padding:2px 5px;border-radius:99px;background:#fff1cf;color:#936217;font-size:8px;font-weight:800}.mapping-caution{margin:5px 1px 0;color:#805d21;font-size:9px;line-height:1.45}.assembly-line{display:grid;grid-template-columns:54px 1fr;align-items:start;gap:7px}.assembly-line+.assembly-line{margin-top:7px;padding-top:7px;border-top:1px dashed #e1e6ee}.assembly-label{padding-top:3px;color:#728097;font-size:9px}.assembly-chunks{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.assembly-plus,.assembly-equals{color:#909aaa;font-size:11px}.assembly-chunk{min-width:18px;padding:2px 5px;border-radius:5px;background:#e6fcf5;color:#087f5b;font-size:14px;text-align:center}.assembly-chunk.expected{background:#fff3bf;color:#8a5c00}.assembly-chunk.error{background:#fff0f0;color:#c92a2a;text-decoration:line-through}.assembly-word{margin-left:2px;color:#172033;font-size:18px;letter-spacing:.4px}.assembly-line.typed .assembly-word{color:#c92a2a}.route-focus{margin:8px 0 0;padding:7px 8px;border-radius:7px;background:#edf2ff;color:#38508e;font-size:9px;line-height:1.45}.muted{font-size:12px;color:#7b879a}.muted.compact{margin:5px 0}.loading,.empty{padding:18px;text-align:center;color:#7b8799;font-size:13px;background:#fff;border:1px dashed #d9e0eb;border-radius:12px}
+      .sound-mapping.has-favorite{padding-right:19px}.sound-favorite{position:absolute;z-index:2;top:2px;right:2px;display:grid;place-items:center;width:19px;height:19px;padding:0;border:0;border-radius:6px;background:transparent;color:#a9b2c0;font-size:15px;line-height:1;cursor:pointer;transition:color .15s,background .15s,transform .15s}.sound-favorite:hover{background:#fff4cf;color:#d79a00;transform:scale(1.08)}.sound-favorite.saved{color:#eda900}.sound-favorite:disabled{cursor:wait;opacity:.6}.alignment-cell{display:flex!important;align-items:center;justify-content:center;gap:1px;font-size:17px}.alignment-part{min-width:12px;padding:2px 1px;border-radius:4px}.alignment-part.correct{color:#087f5b;background:#e6fcf5}.alignment-part.error,.alignment-part.extra{color:#c92a2a;background:#fff0f0}.alignment-part.missing{color:#9a6700;background:#fff3bf}.alignment-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;color:#6b778d;font-size:10px}.legend-item{display:inline-flex;align-items:center;gap:4px}.legend-dot{width:9px;height:9px;border-radius:3px}.legend-dot.correct{background:#63d5ad}.legend-dot.error{background:#ff8787}.legend-dot.missing{background:#ffd43b}
       .issue-list{display:grid;gap:7px;margin-top:10px}.issue-card{padding:9px 10px;border:1px solid #f1d5d2;border-left:3px solid #ff6259;border-radius:9px;background:#fff9f8}.issue-title{font-size:12px;color:#772f37}.issue-explanation,.issue-training{margin:4px 0 0;font-size:11px;line-height:1.5}.issue-explanation{color:#5a4650}.issue-training{color:#3e5c9a}.issue-card.missing_letter{border-left-color:#f4b400;background:#fffdf5}
       .deepseek{margin-top:12px;padding:12px;background:linear-gradient(180deg,#fff 0%,#fbfcff 100%)}.deepseek-heading,.learning-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}.deepseek-heading>strong,.learning-heading>strong{font-size:13px}.deepseek-badge{padding:3px 7px;border-radius:99px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:800}.deepseek-loading,.deepseek-note,.deepseek-error{margin:9px 0 0;padding:10px;border-radius:9px;font-size:11px;line-height:1.55}.deepseek-loading{color:#59677d;background:#f3f6fa}.deepseek-note{color:#5e6d84;background:#f5f7fb}.deepseek-error{color:#a43a35;background:#fff0ef}.deepseek-part{margin-top:11px}.deepseek-part h3{margin:0 0 7px;font-size:11px;color:#526078}.synonym-list,.expression-list{display:grid;gap:7px}.synonym-item,.expression-item{padding:8px 9px;border:1px solid #e7ebf2;border-radius:9px;background:#fff}.synonym-title,.expression-title{display:flex;align-items:center;justify-content:space-between;gap:8px}.synonym-title strong,.expression-title strong{font-size:12px;color:#23304a}.synonym-title span,.expression-title span{flex:0 0 auto;padding:2px 6px;border-radius:99px;background:#eef2ff;color:#4960ac;font-size:9px}.synonym-item p,.expression-item p{margin:4px 0 0;color:#4b5a72;font-size:10px;line-height:1.5}.synonym-item small,.expression-item small{display:block;margin-top:4px;color:#718096;font-size:9px;line-height:1.5}
       .plural{margin-top:10px;padding:9px 10px;background:linear-gradient(180deg,#fff 0%,#fbfcff 100%)}.plural-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.plural-heading>strong{font-size:12px}.plural-badge{padding:3px 7px;border-radius:99px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:800}.plural-state{display:block;margin-top:7px;padding:7px 8px;border-radius:8px;background:#f3f6fa;color:#59677d;font-size:10px;line-height:1.4}.plural-state.unavailable{color:#6d788b;background:#f7f8fa}.plural-state.error{color:#a43a35;background:#fff0ef}.plural-line{display:flex;align-items:center;gap:6px;margin-top:7px;min-width:0}.plural-label{padding:2px 6px;border-radius:6px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:900}.plural-word{min-width:0;overflow:hidden;color:#243552;font-size:16px;text-overflow:ellipsis;white-space:nowrap}.plural-type{padding:2px 6px;border-radius:99px;background:#e7f6ef;color:#087f5b;font-size:9px;font-weight:800}.plural-type.uncountable,.plural-type.not_noun{background:#f1f3f6;color:#667085}.plural-type.both{background:#fff1cc;color:#9a5b00}.plural-play{width:30px;height:27px;margin-left:auto;border:1px solid #ccd6ee;border-radius:8px;background:#fff;color:#4058a9;cursor:pointer}.plural-play:hover{background:#edf1ff}.plural-play:disabled{cursor:wait;opacity:.55}.plural-ipa{margin-top:2px;font-size:16px;color:#526a9a}.plural-note{display:block;margin-top:4px;color:#2f3b51;font-size:10px;line-height:1.45}.plural-actions{display:flex;justify-content:flex-end;margin-top:6px;padding-top:6px;border-top:1px dashed #e6eaf0}.plural-favorite{height:27px!important}
-      .learning{margin-top:12px;padding:12px}.learning-total{font-size:10px;color:#78859a}.weakness-match{display:grid;gap:3px;margin-top:8px;padding:8px;border-radius:9px;background:#fff5e6;border:1px solid #ffe0ad}.weakness-match strong{font-size:10px;color:#9a5b00}.weakness-match span{font-size:10px;color:#6b5738}.pattern-list{display:grid;gap:7px;margin-top:8px}.pattern-item{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:9px;background:#f5f7fb}.pattern-mapping{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}.pattern-sound{font-size:15px;color:#2f4b90}.pattern-correct,.pattern-wrong{padding:2px 6px;border-radius:6px;font-size:10px}.pattern-correct{color:#087f5b;background:#e6fcf5}.pattern-wrong{color:#c92a2a;background:#fff0f0}.pattern-meta{display:grid;justify-items:end;gap:2px;flex:0 0 auto}.pattern-count{white-space:nowrap;font-size:10px;color:#b54b44}.pattern-meta small{max-width:130px;color:#7b8799;font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .learning{margin-top:12px;padding:12px}.learning-total{font-size:10px;color:#78859a;text-align:right}.sound-ranking-list{display:grid;gap:6px;margin-top:8px}.sound-ranking-item{display:grid;grid-template-columns:22px minmax(105px,.8fr) minmax(0,1.2fr);align-items:center;gap:7px;padding:7px 8px;border-radius:9px;background:#f7f9fd}.ranking-index{display:grid;place-items:center;width:20px;height:20px;border-radius:6px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:900}.ranking-mapping{display:flex;align-items:center;gap:5px}.ranking-sound{padding:2px 5px;border:0;border-radius:5px;background:transparent;color:#2f4b90;font-size:15px;font-weight:900;cursor:pointer}.ranking-sound:hover{background:#e9edff}.ranking-arrow{color:#929daf;font-size:10px}.ranking-grapheme{min-width:22px;padding:2px 5px;border-radius:5px;background:#e6fcf5;color:#087f5b;font-size:14px;text-align:center}.ranking-details{display:grid;justify-items:end;min-width:0}.ranking-count{color:#c17900;font-size:9px}.ranking-details small{max-width:100%;overflow:hidden;color:#7b8799;font-size:8px;text-overflow:ellipsis;white-space:nowrap}.open-sound-favorites{width:100%;height:32px;margin-top:8px;border:1px solid #d8def0;border-radius:8px;background:#fff;color:#4058a9;font-size:10px;font-weight:800;cursor:pointer}.open-sound-favorites:hover{border-color:#aebbea;background:#f1f3ff}
       .candidate-section{margin-top:10px}.section-title{display:flex;align-items:center;justify-content:space-between;margin:0 2px 7px}.section-title>div{display:flex;flex-direction:column;gap:1px}.section-title strong{font-size:13px}.section-title small{font-size:9px;color:#7a8698}.candidate-count{padding:3px 7px;color:#ff514c;background:#ffe9e7;font-size:10px}.candidates{display:grid;gap:6px}.candidate-card{padding:9px 10px}.candidate-card.typed-candidate{border-color:#8fa1e6;background:linear-gradient(135deg,#f6f8ff,#fff)}.candidate-top{gap:8px}.candidate-identity{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}.candidate-word{font-size:20px;line-height:1.15;color:#172033}.match-badge{font-size:9px;padding:2px 5px;color:#4058a9;background:#e9edff}.priority-badge{font-size:9px;padding:2px 5px;color:#9b5200;background:#fff0c7}.book-badge{font-size:9px;padding:2px 5px;color:#506076;background:#eef2f7}.candidate-controls{display:grid;flex:0 0 52px;gap:4px;width:52px}.candidate-controls .audio-button,.candidate-controls .favorite-button{width:52px;min-width:52px}.candidate-controls .audio-button{height:30px;border-radius:8px}.candidate-ipa{font-size:20px;margin-top:1px}.candidate-meaning{margin:3px 0 0;color:#45536b;font-size:11px;line-height:1.4}.favorite-button{height:27px;padding:0 8px;border:1px solid #ffaaa5;border-radius:8px;background:#fff5f4;color:#d94841;font-size:9px;font-weight:800;white-space:nowrap;cursor:pointer}.favorite-button:hover{background:#ffe7e5}.favorite-button.saved{border-color:#b8decf;background:#e9f8f2;color:#087f5b}.favorite-button:disabled{cursor:default;opacity:.8}.candidate-favorite{padding:0 3px}
       @media(max-width:600px){.panel{width:calc(100vw - 16px);min-width:calc(100vw - 16px)}.body{padding:10px}.word{font-size:24px}.target-ipa{font-size:24px}}
     `;

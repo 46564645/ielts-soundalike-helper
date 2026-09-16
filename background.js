@@ -10,7 +10,7 @@ const BY_WORD = new Map(VOCABULARY.map((item) => [P.normalizeWord(item.word), it
 const ipaCache = new Map();
 const audioCache = new Map();
 const MAX_AUDIO_CACHE = 120;
-const PROFILE_KEY = "soundErrorProfileV1";
+const SOUND_FAVORITES_KEY = "soundSpellingFavoritesV1";
 const DEEPSEEK_CACHE_KEY = "deepseekWordCacheV1";
 const DEEPSEEK_CACHE_MAX = 120;
 const DEEPSEEK_CACHE_TTL = 30 * 24 * 60 * 60 * 1000;
@@ -57,6 +57,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     getLearningState()
       .then((payload) => sendResponse({ ok: true, ...payload }))
       .catch((error) => sendResponse({ ok: false, error: readableError(error) }));
+    return true;
+  }
+  if (message?.type === "TOGGLE_SOUND_SPELLING_FAVORITE") {
+    toggleSoundSpellingFavorite(message.favorite)
+      .then((payload) => sendResponse({ ok: true, ...payload }))
+      .catch((error) => sendResponse({ ok: false, error: readableError(error) }));
+    return true;
+  }
+  if (message?.type === "OPEN_SOUND_SPELLING_FAVORITES") {
+    chrome.tabs.create({ url: chrome.runtime.getURL("sound-favorites.html") }, () => {
+      sendResponse(chrome.runtime.lastError
+        ? { ok: false, error: chrome.runtime.lastError.message }
+        : { ok: true });
+    });
     return true;
   }
   if (message?.type === "GET_COMPARISON_AUDIO") {
@@ -455,7 +469,6 @@ async function prepareWord(rawWord, rawAccent) {
   }
 
   const targetWord = await enrichWord(target, accent, true);
-  targetWord.weaknessMatches = await findWeaknessMatches(targetWord).catch(() => []);
   const matchingTarget = P.tokenizeIpa(target.ukIpa).length ? target : { ...target, ukIpa: targetWord.ipa };
   const localCandidates = P.findCandidates(matchingTarget, VOCABULARY, 4);
   const candidateWords = await Promise.all(
@@ -572,16 +585,7 @@ async function analyzeAttemptMessage(message) {
 
   const soundSpelling = C.analyzeSoundSpelling(typed, correctItem.word, correctIpaResult.ipa);
   const spelling = P.alignCharacters(typed, correctItem.word);
-  const shouldRecord = message.record !== false && soundSpelling.issues.length > 0;
-  const learning = shouldRecord
-    ? await recordLearningAttempt({
-        attemptKey: String(message.attemptKey || ""),
-        typed,
-        correctItem,
-        correctIpa: correctIpaResult.ipa,
-        issues: soundSpelling.issues
-      })
-    : await getLearningState();
+  const learning = await getLearningState();
   return {
     available: true,
     accent,
@@ -654,112 +658,77 @@ function blobToDataUrl(blob) {
   });
 }
 
-async function recordLearningAttempt({ attemptKey, typed, correctItem, correctIpa, issues }) {
-  const now = Date.now();
-  const profileState = await storageGet({ [PROFILE_KEY]: emptyProfile() });
-  const profile = normalizeProfile(profileState[PROFILE_KEY]);
-  const stableAttemptKey = attemptKey || `${correctItem.key || correctItem.word}|${typed}|${now}`;
-  if (profile.recentAttemptKeys.includes(stableAttemptKey)) {
-    return getLearningState({ profile });
-  }
-
-  profile.totalIncorrectAttempts += 1;
-  profile.lastUpdated = now;
-  profile.recentAttemptKeys = [...profile.recentAttemptKeys, stableAttemptKey].slice(-80);
-  for (const issue of issues) {
-    const existing = profile.patterns[issue.id] || {
-      id: issue.id,
-      type: issue.type,
-      sound: issue.sound,
-      phonemes: issue.phonemes,
-      correctGrapheme: issue.correctGrapheme,
-      userGrapheme: issue.userGrapheme,
-      title: issue.title,
-      training: issue.training,
-      count: 0,
-      words: [],
-      examples: []
-    };
-    existing.count += 1;
-    existing.lastSeen = now;
-    existing.title = issue.title;
-    existing.training = issue.training;
-    existing.words = [...new Set([correctItem.word, ...(existing.words || [])])].slice(0, 8);
-    existing.examples = [
-      { word: correctItem.word, typed, at: now },
-      ...(existing.examples || []).filter((example) => example.word !== correctItem.word || example.typed !== typed)
-    ].slice(0, 5);
-    profile.patterns[issue.id] = existing;
-  }
-
-  await storageSet({ [PROFILE_KEY]: profile });
-  return getLearningState({ profile });
+async function toggleSoundSpellingFavorite(rawFavorite) {
+  const favorite = normalizeSoundSpellingFavorite(rawFavorite);
+  if (!favorite) throw new Error("这个声音—字母块暂时不能收藏");
+  const state = await storageGet({ [SOUND_FAVORITES_KEY]: [] });
+  const stored = normalizeSoundSpellingFavorites(state[SOUND_FAVORITES_KEY]);
+  const exists = stored.some((item) => item.id === favorite.id);
+  const next = exists
+    ? stored.filter((item) => item.id !== favorite.id)
+    : [{ ...favorite, createdAt: Date.now() }, ...stored.filter((item) => item.id !== favorite.id)].slice(0, 300);
+  await storageSet({ [SOUND_FAVORITES_KEY]: next });
+  return {
+    saved: !exists,
+    id: favorite.id,
+    learning: buildFavoriteLearningState(next)
+  };
 }
 
-async function getLearningState(existing) {
-  let profile = existing?.profile;
-  if (!profile) {
-    const state = await storageGet({ [PROFILE_KEY]: emptyProfile() });
-    profile = normalizeProfile(state[PROFILE_KEY]);
-  }
-  const topPatterns = Object.values(profile.patterns || {})
-    .sort((a, b) => b.count - a.count || b.lastSeen - a.lastSeen)
-    .slice(0, 5)
-    .map((pattern) => ({
-      id: pattern.id,
-      type: pattern.type,
-      sound: pattern.sound,
-      correctGrapheme: pattern.correctGrapheme,
-      userGrapheme: pattern.userGrapheme,
-      title: pattern.title,
-      training: pattern.training,
-      count: pattern.count,
-      words: pattern.words || []
-    }));
+async function getLearningState() {
+  const state = await storageGet({ [SOUND_FAVORITES_KEY]: [] });
+  return buildFavoriteLearningState(normalizeSoundSpellingFavorites(state[SOUND_FAVORITES_KEY]));
+}
+
+function buildFavoriteLearningState(favorites) {
+  const fullRanking = C.summarizeSoundFavorites(favorites, Number.POSITIVE_INFINITY);
   return {
     profile: {
-      totalIncorrectAttempts: Number(profile.totalIncorrectAttempts || 0),
-      patternCount: Object.keys(profile.patterns || {}).length,
-      topPatterns
+      favoriteCount: favorites.length,
+      mappingCount: fullRanking.length,
+      favoriteIds: favorites.map((item) => item.id),
+      ranking: fullRanking.slice(0, 6)
     }
   };
 }
 
-async function findWeaknessMatches(wordItem) {
-  const state = await storageGet({ [PROFILE_KEY]: emptyProfile() });
-  const profile = normalizeProfile(state[PROFILE_KEY]);
-  const patterns = Object.values(profile.patterns || {});
-  if (!patterns.length) return [];
-  const keys = new Set(
-    C.segmentSoundSpelling(wordItem.word, wordItem.ipa || wordItem.ukIpa)
-      .map((segment) => `${segment.phonemes.join("")}\u0000${segment.grapheme}`)
-  );
-  return patterns
-    .filter((pattern) => keys.has(`${(pattern.phonemes || []).join("")}\u0000${pattern.correctGrapheme}`))
-    .sort((a, b) => b.count - a.count || b.lastSeen - a.lastSeen)
-    .slice(0, 3)
-    .map((pattern) => ({
-      id: pattern.id,
-      title: pattern.title,
-      sound: pattern.sound,
-      correctGrapheme: pattern.correctGrapheme,
-      count: pattern.count
-    }));
+function normalizeSoundSpellingFavorites(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const output = [];
+  for (const item of value) {
+    const favorite = normalizeSoundSpellingFavorite(item);
+    if (!favorite || seen.has(favorite.id)) continue;
+    seen.add(favorite.id);
+    output.push(favorite);
+  }
+  return output.slice(0, 300);
 }
 
-function emptyProfile() {
-  return { version: 1, totalIncorrectAttempts: 0, lastUpdated: 0, recentAttemptKeys: [], patterns: {} };
-}
-
-function normalizeProfile(value) {
-  const profile = value && typeof value === "object" ? value : emptyProfile();
+function normalizeSoundSpellingFavorite(value) {
+  const phonemes = Array.isArray(value?.phonemes)
+    ? value.phonemes.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 3)
+    : [];
+  const grapheme = C.normalizeLetters(value?.grapheme || "").slice(0, 8);
+  const word = String(value?.word || "").trim().replace(/\s+/g, " ").slice(0, 120);
+  if (!phonemes.length || !grapheme || !word) return null;
+  const id = soundSpellingFavoriteId(phonemes, grapheme, word);
   return {
-    version: 1,
-    totalIncorrectAttempts: Number(profile.totalIncorrectAttempts || 0),
-    lastUpdated: Number(profile.lastUpdated || 0),
-    recentAttemptKeys: Array.isArray(profile.recentAttemptKeys) ? profile.recentAttemptKeys : [],
-    patterns: profile.patterns && typeof profile.patterns === "object" ? profile.patterns : {}
+    id,
+    sound: `/${phonemes.join("")}/`,
+    phonemes,
+    grapheme,
+    word,
+    ipa: P.cleanIpa(value?.ipa || "").slice(0, 180),
+    accent: value?.accent === "uk" ? "uk" : "us",
+    createdAt: Number(value?.createdAt || 0)
   };
+}
+
+function soundSpellingFavoriteId(phonemes, grapheme, word) {
+  return [phonemes.join(" "), P.normalizeWord(grapheme), P.normalizeWord(word)]
+    .map((part) => encodeURIComponent(part))
+    .join("|");
 }
 
 function storageGet(defaults) {

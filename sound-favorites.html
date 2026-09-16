@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>音标对应收藏 - 听写辨音助手</title>
+  <link rel="stylesheet" href="sound-favorites.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-star" aria-hidden="true">★</span>
+      <div>
+        <p class="eyebrow">MY SOUND MAP</p>
+        <h1>音标对应收藏</h1>
+        <p class="subtitle">只收录你亲自点亮的声音—字母块</p>
+      </div>
+    </div>
+    <div class="summary" aria-live="polite">
+      <span><strong id="mapping-count">0</strong> 组对应</span>
+      <i></i>
+      <span><strong id="word-count">0</strong> 个单词</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="intro">
+      <div>
+        <span class="intro-mark">声音</span>
+        <b>→</b>
+        <span class="intro-mark letters">字母块</span>
+      </div>
+      <p>同一组对应收藏的单词越多，排列越靠前。点击音标可以再次听音。</p>
+    </section>
+
+    <section class="toolbar" aria-label="筛选音标收藏">
+      <label for="search">查找收藏</label>
+      <input id="search" type="search" autocomplete="off" spellcheck="false" placeholder="搜索 /v/、字母 v 或单词 university">
+      <select id="accent-filter" aria-label="发音类型">
+        <option value="all">全部口音</option>
+        <option value="us">美式</option>
+        <option value="uk">英式</option>
+      </select>
+    </section>
+
+    <section id="favorite-list" class="favorite-list" aria-live="polite"></section>
+    <section id="empty" class="empty" hidden>
+      <div aria-hidden="true">☆</div>
+      <h2>还没有音标对应收藏</h2>
+      <p>做完听写后，在“把发音对应到字母块”里点击右上角的小星星。</p>
+    </section>
+  </main>
+
+  <script src="lib/phonetics.js"></script>
+  <script src="sound-favorites.js"></script>
+</body>
+</html>

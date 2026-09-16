@@ -2,7 +2,7 @@
 
 const DEFAULTS = { enabled: true, accent: "us" };
 const LOCAL_DEFAULTS = {
-  soundErrorProfileV1: null,
+  soundSpellingFavoritesV1: [],
   deepseekEnabled: true,
   deepseekApiKey: "",
   deepseekModel: "deepseek-v4-flash"
@@ -29,10 +29,9 @@ chrome.storage.sync.get(DEFAULTS, (settings) => {
 });
 
 chrome.storage.local.get(LOCAL_DEFAULTS, (state) => {
-  const profile = state.soundErrorProfileV1;
-  const patterns = profile?.patterns ? Object.keys(profile.patterns).length : 0;
-  const attempts = Number(profile?.totalIncorrectAttempts || 0);
-  learningStats.textContent = attempts ? `${patterns} 类映射 · ${attempts} 次错答` : "尚无错题记录";
+  const favorites = Array.isArray(state.soundSpellingFavoritesV1) ? state.soundSpellingFavoritesV1 : [];
+  const mappings = new Set(favorites.map((item) => `${(item?.phonemes || []).join(" ")}\u0000${item?.grapheme || ""}`)).size;
+  learningStats.textContent = favorites.length ? `${mappings} 组对应 · ${favorites.length} 个收藏词` : "尚无手动收藏";
   deepseekEnabled.checked = state.deepseekEnabled !== false;
   hasDeepseekKey = Boolean(String(state.deepseekApiKey || "").trim());
   updateDeepseekStatus();

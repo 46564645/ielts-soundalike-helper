@@ -490,36 +490,23 @@ async function prepareTypedCandidate(rawTyped, rawCorrect, rawAccent) {
   const accent = normalizeAccent(rawAccent);
   if (!typed || !correctKey || typed === correctKey) return { found: false };
 
-  let item = BY_WORD.get(typed) || null;
-  let match = "exact";
-  if (!item) {
-    match = "distance1";
-    item = VOCABULARY
-      .filter((entry) => {
-        const key = P.normalizeWord(entry.word);
-        return key !== correctKey && Math.abs(key.length - typed.length) <= 1 && P.damerauLevenshtein(typed, key) === 1;
-      })
-      .sort((left, right) => {
-        const correctGap = P.damerauLevenshtein(left.word, correctKey) - P.damerauLevenshtein(right.word, correctKey);
-        if (correctGap) return correctGap;
-        const priorityGap = Number(Boolean(right.priority)) - Number(Boolean(left.priority));
-        if (priorityGap) return priorityGap;
-        return String(left.word).localeCompare(String(right.word));
-      })[0] || null;
-  }
-  if (!item || P.normalizeWord(item.word) === correctKey) return { found: false };
+  const item = P.findClosestSpelling(typed, VOCABULARY, correctKey);
+  if (!item) return { found: false };
+  const distance = Number(item.spellingDistance) || 0;
+  const match = distance === 0 ? "exact" : "nearest";
 
   const correctItem = BY_WORD.get(correctKey);
   const correctIpa = correctItem ? (await resolveIpa(correctItem, accent).catch(() => ({ ipa: correctItem.ukIpa }))).ipa : "";
   const candidate = await enrichCandidate({
     ...item,
     channels: ["用户拼写"],
-    label: match === "exact" ? "你的拼写（词库词）" : "与你的拼写差1字母"
+    label: match === "exact" ? "你的拼写（词库词）" : `与你的拼写最接近（差${distance}步）`
   }, accent, correctIpa);
   return {
     found: true,
     typed,
     match,
+    distance,
     candidate: { ...candidate, userInputCandidate: true }
   };
 }

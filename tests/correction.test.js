@@ -28,6 +28,22 @@ test("oxygen follows the sound-to-spelling route", () => {
   assert.match(result.issues[0].training, /“oxygen”中的 \/ɪ\/ → y/);
 });
 
+test("the first typed candidate is the closest spelling outside the correct answer", () => {
+  const vocabulary = [
+    { word: "cat", priority: true },
+    { word: "coat", priority: true },
+    { word: "cut", priority: false },
+    { word: "dog", priority: true }
+  ];
+  const nearest = P.findClosestSpelling("cot", vocabulary, "cat");
+  assert.equal(nearest.word, "cut");
+  assert.equal(nearest.spellingDistance, 1);
+
+  const exact = P.findClosestSpelling("coat", vocabulary, "cat");
+  assert.equal(exact.word, "coat");
+  assert.equal(exact.spellingDistance, 0);
+});
+
 test("every vocabulary entry keeps all letters and all available phonemes", () => {
   const validConfidence = new Set(["mapped", "estimated", "silent", "unmapped", "unknown"]);
   let mappedBlocks = 0;

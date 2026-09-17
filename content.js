@@ -5,6 +5,7 @@
   const IS_IDICTATION = location.hostname === "www.idictation.cn";
   const COMPARISONS_KEY = "pronunciationComparisonsV1";
   const SOUND_FAVORITES_KEY = "soundSpellingFavoritesV1";
+  const PHONEME_CLIP_MS = 1000;
   const DEFAULTS = { enabled: true, accent: "us", overlayReopenNonce: 0 };
   let settings = { ...DEFAULTS };
   let prepared = null;
@@ -18,7 +19,7 @@
   let closedForSession = false;
   let activeAudio = null;
   let activeAudioRun = 0;
-  let audioShortcuts = { target: null, candidates: [] };
+  let audioShortcuts = { target: null, candidates: [], plural: null };
   let resizeSaveTimer = 0;
   let idictationClueKey = "";
   let idictationResolveRun = 0;
@@ -245,15 +246,19 @@
     ) return false;
     const isTarget = event.code === "Backquote" || event.key === "`" || event.key === "~" || event.key === "·";
     const digitMatch = String(event.code || "").match(/^(?:Digit|Numpad)([1-5])$/) || String(event.key || "").match(/^([1-5])$/);
+    const isPlural = event.code === "Digit6" || event.code === "Numpad6" || event.key === "6";
     const audio = isTarget
       ? audioShortcuts.target
       : digitMatch
         ? audioShortcuts.candidates[Number(digitMatch[1]) - 1]
-        : null;
+        : isPlural
+          ? audioShortcuts.plural
+          : null;
     if (!audio) return false;
     event.preventDefault();
     event.stopImmediatePropagation();
-    playAudio(audio.url, audio.word);
+    if (isPlural) playPluralAudio(audio.word);
+    else playAudio(audio.url, audio.word);
     return true;
   }
 
@@ -576,7 +581,7 @@
     ui.word.textContent = "当前词已隐藏";
     ui.book.textContent = "完成判题后恢复";
     ui.targetIpa.replaceChildren();
-    audioShortcuts = { target: null, candidates: [] };
+    audioShortcuts = { target: null, candidates: [], plural: null };
     ui.playTarget.disabled = true;
     decorateAudioButton(ui.playTarget, "·");
     ui.playTarget.onclick = null;
@@ -862,6 +867,7 @@
   function renderPlural(container, response, target) {
     container.replaceChildren();
     container.hidden = false;
+    audioShortcuts.plural = null;
     const heading = element("div", "", "plural-heading");
     heading.append(
       element("strong", "复数与可数用法"),
@@ -889,7 +895,10 @@
       element("strong", data.plural || "无常用复数", "plural-word"),
       element("span", pluralNounType(data.nounType), `plural-type ${data.nounType || "not_noun"}`)
     );
-    if (data.plural) line.append(pluralAudioButton(data.plural));
+    if (data.plural) {
+      audioShortcuts.plural = { word: data.plural, url: "", promise: null };
+      line.append(pluralAudioButton(data.plural));
+    }
     container.append(line);
     if (data.plural) {
       const ipa = element("div", "", "ipa plural-ipa");
@@ -928,17 +937,32 @@
   }
 
   function pluralAudioButton(word) {
-    const button = element("button", "🔊", "plural-play");
+    const button = element("button", "", "plural-play");
     button.type = "button";
-    button.title = `播放 ${word} 的完整发音`;
-    button.addEventListener("click", async () => {
-      if (button.disabled) return;
-      button.disabled = true;
-      const response = await sendMessage({ type: "GET_COMPARISON_AUDIO", word, accent: settings.accent }).catch(() => null);
-      button.disabled = false;
-      playAudio(response?.ok ? response.audioUrl : "", word);
-    });
+    button.title = `播放 ${word} 的完整发音（快捷键 6）`;
+    decorateAudioButton(button, "6");
+    button.addEventListener("click", () => playPluralAudio(word, button));
     return button;
+  }
+
+  async function playPluralAudio(word, button = null) {
+    const key = P.normalizeWord(word);
+    if (!key || button?.disabled) return;
+    let state = audioShortcuts.plural;
+    if (!state || P.normalizeWord(state.word) !== key) {
+      state = { word, url: "", promise: null };
+      audioShortcuts.plural = state;
+    }
+    if (button) button.disabled = true;
+    if (!state.url) {
+      state.promise ||= sendMessage({ type: "GET_COMPARISON_AUDIO", word, accent: settings.accent })
+        .catch(() => null);
+      const response = await state.promise;
+      state.promise = null;
+      state.url = response?.ok ? response.audioUrl : "";
+    }
+    if (button) button.disabled = false;
+    playAudio(state.url, word);
   }
 
   function formatRegister(value) {
@@ -1176,6 +1200,7 @@
 
   function stopActiveAudio() {
     activeAudioRun += 1;
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     if (activeAudio) {
       activeAudio.pause();
       activeAudio.currentTime = 0;
@@ -1194,14 +1219,23 @@
       const audio = new Audio(queue[index++]);
       activeAudio = audio;
       let advanced = false;
+      let clipTimer = 0;
       const advance = () => {
         if (advanced || runId !== activeAudioRun) return;
         advanced = true;
+        window.clearTimeout(clipTimer);
+        audio.pause();
+        audio.currentTime = 0;
+        if (activeAudio === audio) activeAudio = null;
         playNext();
       };
       audio.addEventListener("ended", advance, { once: true });
       audio.addEventListener("error", advance, { once: true });
-      audio.play().catch(advance);
+      audio.play()
+        .then(() => {
+          clipTimer = window.setTimeout(advance, PHONEME_CLIP_MS);
+        })
+        .catch(advance);
     };
     playNext();
   }
@@ -1600,7 +1634,7 @@
       .sound-mapping.has-favorite{padding-right:19px}.sound-favorite{position:absolute;z-index:2;top:2px;right:2px;display:grid;place-items:center;width:19px;height:19px;padding:0;border:0;border-radius:6px;background:transparent;color:#a9b2c0;font-size:15px;line-height:1;cursor:pointer;transition:color .15s,background .15s,transform .15s}.sound-favorite:hover{background:#fff4cf;color:#d79a00;transform:scale(1.08)}.sound-favorite.saved{color:#eda900}.sound-favorite:disabled{cursor:wait;opacity:.6}.alignment-cell{display:flex!important;align-items:center;justify-content:center;gap:1px;font-size:17px}.alignment-part{min-width:12px;padding:2px 1px;border-radius:4px}.alignment-part.correct{color:#087f5b;background:#e6fcf5}.alignment-part.error,.alignment-part.extra{color:#c92a2a;background:#fff0f0}.alignment-part.missing{color:#9a6700;background:#fff3bf}.alignment-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;color:#6b778d;font-size:10px}.legend-item{display:inline-flex;align-items:center;gap:4px}.legend-dot{width:9px;height:9px;border-radius:3px}.legend-dot.correct{background:#63d5ad}.legend-dot.error{background:#ff8787}.legend-dot.missing{background:#ffd43b}
       .issue-list{display:grid;gap:7px;margin-top:10px}.issue-card{padding:9px 10px;border:1px solid #f1d5d2;border-left:3px solid #ff6259;border-radius:9px;background:#fff9f8}.issue-title{font-size:12px;color:#772f37}.issue-explanation,.issue-training{margin:4px 0 0;font-size:11px;line-height:1.5}.issue-explanation{color:#5a4650}.issue-training{color:#3e5c9a}.issue-card.missing_letter{border-left-color:#f4b400;background:#fffdf5}
       .deepseek{margin-top:12px;padding:12px;background:linear-gradient(180deg,#fff 0%,#fbfcff 100%)}.deepseek-heading,.learning-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}.deepseek-heading>strong,.learning-heading>strong{font-size:13px}.deepseek-badge{padding:3px 7px;border-radius:99px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:800}.deepseek-loading,.deepseek-note,.deepseek-error{margin:9px 0 0;padding:10px;border-radius:9px;font-size:11px;line-height:1.55}.deepseek-loading{color:#59677d;background:#f3f6fa}.deepseek-note{color:#5e6d84;background:#f5f7fb}.deepseek-error{color:#a43a35;background:#fff0ef}.deepseek-part{margin-top:11px}.deepseek-part h3{margin:0 0 7px;font-size:11px;color:#526078}.synonym-list,.expression-list{display:grid;gap:7px}.synonym-item,.expression-item{padding:8px 9px;border:1px solid #e7ebf2;border-radius:9px;background:#fff}.synonym-title,.expression-title{display:flex;align-items:center;justify-content:space-between;gap:8px}.synonym-title strong,.expression-title strong{font-size:12px;color:#23304a}.synonym-title span,.expression-title span{flex:0 0 auto;padding:2px 6px;border-radius:99px;background:#eef2ff;color:#4960ac;font-size:9px}.synonym-item p,.expression-item p{margin:4px 0 0;color:#4b5a72;font-size:10px;line-height:1.5}.synonym-item small,.expression-item small{display:block;margin-top:4px;color:#718096;font-size:9px;line-height:1.5}
-      .plural{margin-top:10px;padding:9px 10px;background:linear-gradient(180deg,#fff 0%,#fbfcff 100%)}.plural-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.plural-heading>strong{font-size:12px}.plural-badge{padding:3px 7px;border-radius:99px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:800}.plural-state{display:block;margin-top:7px;padding:7px 8px;border-radius:8px;background:#f3f6fa;color:#59677d;font-size:10px;line-height:1.4}.plural-state.unavailable{color:#6d788b;background:#f7f8fa}.plural-state.error{color:#a43a35;background:#fff0ef}.plural-line{display:flex;align-items:center;gap:6px;margin-top:7px;min-width:0}.plural-label{padding:2px 6px;border-radius:6px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:900}.plural-word{min-width:0;overflow:hidden;color:#243552;font-size:16px;text-overflow:ellipsis;white-space:nowrap}.plural-type{padding:2px 6px;border-radius:99px;background:#e7f6ef;color:#087f5b;font-size:9px;font-weight:800}.plural-type.uncountable,.plural-type.not_noun{background:#f1f3f6;color:#667085}.plural-type.both{background:#fff1cc;color:#9a5b00}.plural-play{width:30px;height:27px;margin-left:auto;border:1px solid #ccd6ee;border-radius:8px;background:#fff;color:#4058a9;cursor:pointer}.plural-play:hover{background:#edf1ff}.plural-play:disabled{cursor:wait;opacity:.55}.plural-ipa{margin-top:2px;font-size:16px;color:#526a9a}.plural-note{display:block;margin-top:4px;color:#2f3b51;font-size:10px;line-height:1.45}.plural-actions{display:flex;justify-content:flex-end;margin-top:6px;padding-top:6px;border-top:1px dashed #e6eaf0}.plural-favorite{height:27px!important}
+      .plural{margin-top:10px;padding:9px 10px;background:linear-gradient(180deg,#fff 0%,#fbfcff 100%)}.plural-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.plural-heading>strong{font-size:12px}.plural-badge{padding:3px 7px;border-radius:99px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:800}.plural-state{display:block;margin-top:7px;padding:7px 8px;border-radius:8px;background:#f3f6fa;color:#59677d;font-size:10px;line-height:1.4}.plural-state.unavailable{color:#6d788b;background:#f7f8fa}.plural-state.error{color:#a43a35;background:#fff0ef}.plural-line{display:flex;align-items:center;gap:6px;margin-top:7px;min-width:0}.plural-label{padding:2px 6px;border-radius:6px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:900}.plural-word{min-width:0;overflow:hidden;color:#243552;font-size:16px;text-overflow:ellipsis;white-space:nowrap}.plural-type{padding:2px 6px;border-radius:99px;background:#e7f6ef;color:#087f5b;font-size:9px;font-weight:800}.plural-type.uncountable,.plural-type.not_noun{background:#f1f3f6;color:#667085}.plural-type.both{background:#fff1cc;color:#9a5b00}.plural-play{display:inline-flex;align-items:center;justify-content:center;gap:3px;width:46px;height:27px;margin-left:auto;border:1px solid #ccd6ee;border-radius:8px;background:#fff;color:#4058a9;cursor:pointer}.plural-play:hover{background:#edf1ff}.plural-play:disabled{cursor:wait;opacity:.55}.plural-ipa{margin-top:2px;font-size:16px;color:#526a9a}.plural-note{display:block;margin-top:4px;color:#2f3b51;font-size:10px;line-height:1.45}.plural-actions{display:flex;justify-content:flex-end;margin-top:6px;padding-top:6px;border-top:1px dashed #e6eaf0}.plural-favorite{height:27px!important}
       .learning{margin-top:12px;padding:12px}.learning-total{font-size:10px;color:#78859a;text-align:right}.sound-ranking-list{display:grid;gap:6px;margin-top:8px}.sound-ranking-item{display:grid;grid-template-columns:22px minmax(105px,.8fr) minmax(0,1.2fr);align-items:center;gap:7px;padding:7px 8px;border-radius:9px;background:#f7f9fd}.ranking-index{display:grid;place-items:center;width:20px;height:20px;border-radius:6px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:900}.ranking-mapping{display:flex;align-items:center;gap:5px}.ranking-sound{padding:2px 5px;border:0;border-radius:5px;background:transparent;color:#2f4b90;font-size:15px;font-weight:900;cursor:pointer}.ranking-sound:hover{background:#e9edff}.ranking-arrow{color:#929daf;font-size:10px}.ranking-grapheme{min-width:22px;padding:2px 5px;border-radius:5px;background:#e6fcf5;color:#087f5b;font-size:14px;text-align:center}.ranking-details{display:grid;justify-items:end;min-width:0}.ranking-count{color:#c17900;font-size:9px}.ranking-details small{max-width:100%;overflow:hidden;color:#7b8799;font-size:8px;text-overflow:ellipsis;white-space:nowrap}.open-sound-favorites{width:100%;height:32px;margin-top:8px;border:1px solid #d8def0;border-radius:8px;background:#fff;color:#4058a9;font-size:10px;font-weight:800;cursor:pointer}.open-sound-favorites:hover{border-color:#aebbea;background:#f1f3ff}
       .candidate-section{margin-top:10px}.section-title{display:flex;align-items:center;justify-content:space-between;margin:0 2px 7px}.section-title>div{display:flex;flex-direction:column;gap:1px}.section-title strong{font-size:13px}.section-title small{font-size:9px;color:#7a8698}.candidate-count{padding:3px 7px;color:#ff514c;background:#ffe9e7;font-size:10px}.candidates{display:grid;gap:6px}.candidate-card{padding:9px 10px}.candidate-card.typed-candidate{border-color:#8fa1e6;background:linear-gradient(135deg,#f6f8ff,#fff)}.candidate-top{gap:8px}.candidate-identity{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}.candidate-word{font-size:20px;line-height:1.15;color:#172033}.match-badge{font-size:9px;padding:2px 5px;color:#4058a9;background:#e9edff}.priority-badge{font-size:9px;padding:2px 5px;color:#9b5200;background:#fff0c7}.book-badge{font-size:9px;padding:2px 5px;color:#506076;background:#eef2f7}.candidate-controls{display:grid;flex:0 0 52px;gap:4px;width:52px}.candidate-controls .audio-button,.candidate-controls .favorite-button{width:52px;min-width:52px}.candidate-controls .audio-button{height:30px;border-radius:8px}.candidate-ipa{font-size:20px;margin-top:1px}.candidate-meaning{margin:3px 0 0;color:#45536b;font-size:11px;line-height:1.4}.favorite-button{height:27px;padding:0 8px;border:1px solid #ffaaa5;border-radius:8px;background:#fff5f4;color:#d94841;font-size:9px;font-weight:800;white-space:nowrap;cursor:pointer}.favorite-button:hover{background:#ffe7e5}.favorite-button.saved{border-color:#b8decf;background:#e9f8f2;color:#087f5b}.favorite-button:disabled{cursor:default;opacity:.8}.candidate-favorite{padding:0 3px}
       @media(max-width:600px){.panel{width:calc(100vw - 16px);min-width:calc(100vw - 16px)}.body{padding:10px}.word{font-size:24px}.target-ipa{font-size:24px}}

@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "听写辨音助手",
+  "version": "2.9.0",
+  "description": "适配 iPhone 与 iPad Safari 的雅思听写辨音、拼写纠错和发音收藏助手。",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "https://ielts.itongzhuo.com/*",
+    "https://www.idictation.cn/*",
+    "https://ai-oss3.oss-cn-shenzhen.aliyuncs.com/*",
+    "https://api.datamuse.com/*",
+    "https://api.deepseek.com/*",
+    "https://dict.youdao.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.idictation.cn/*"],
+      "js": ["safari-page-loader.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://ielts.itongzhuo.com/*",
+        "https://www.idictation.cn/*"
+      ],
+      "js": ["lib/phonetics.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page-capture.js", "audio/phonemes/kk/*.mp3"],
+      "matches": ["https://ielts.itongzhuo.com/*", "https://www.idictation.cn/*"]
+    }
+  ],
+  "action": {
+    "default_title": "听写辨音助手",
+    "default_popup": "popup.html"
+  },
+  "options_page": "comparison.html",
+  "browser_specific_settings": {
+    "safari": {
+      "strict_min_version": "15.4"
+    }
+  }
+}

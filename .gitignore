@@ -3,6 +3,7 @@
 *.key
 *.crx
 *.zip
+dist/
 .env
 .env.*
 

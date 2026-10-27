@@ -1,9 +1,22 @@
-# 听写辨音助手 v2.8.2
+# 听写辨音助手 v2.9.0
 
 这是为以下雅思听写页面定制的 Chrome / Edge 扩展：
 
 - `https://ielts.itongzhuo.com/business/ielts/student/jumpAnswerWordDictation.do`
 - `https://www.idictation.cn/home`
+
+## v2.9.0 iOS Safari 与手机界面
+
+- 新增 Safari 专用 Manifest V3 清单、爱听写页面桥接脚本和资源打包脚本；最低支持 iOS/iPadOS 15.4。
+- 小屏幕结果面板改为贴合安全区的底部抽屉，上下拖动标题栏可调整高度，播放与收藏按钮扩大为触控尺寸。
+- 手机端隐藏实体键盘快捷键提示；桌面 Edge/Chrome 继续使用原来的可拖动、可拉伸悬浮窗。
+- Safari 版移除不受支持的 `tts` 权限，继续使用单词音频并以系统 `speechSynthesis` 作为回退。
+- 构建、Xcode 转换与真机安装步骤见 [`SAFARI_IOS.md`](SAFARI_IOS.md)。
+
+## v2.8.3 音标代表词
+
+- “把发音对应到字母块”中的每个音标下方显示一个简单代表词，例如 `/e/` 下显示 `bed`、`/ɪŋ/` 下显示 `sing`。
+- 代表词覆盖当前词库使用的全部单音素和组合音素块，只作辨音提示，不改变音标点击发音和纠错逻辑。
 
 ## v2.8.2 首位拼写候选、单次音素播放与复数快捷键
 

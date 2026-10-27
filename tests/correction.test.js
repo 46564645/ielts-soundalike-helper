@@ -10,6 +10,22 @@ require("../data/vocabulary.js");
 const P = globalThis.IeltsPhonetics;
 const C = globalThis.IeltsCorrection;
 
+test("sound blocks have simple representative words", () => {
+  assert.equal(P.phonemeExample(["e"]), "bed");
+  assert.equal(P.phonemeExample(["ɪ", "ŋ"]), "sing");
+  assert.equal(P.phonemeExample(["k", "s"]), "box");
+
+  const missing = new Set();
+  for (const item of globalThis.IELTS_VOCABULARY) {
+    for (const block of C.segmentSoundSpelling(item.word, item.ukIpa)) {
+      if (block.phonemes.length && !P.phonemeExample(block.phonemes)) {
+        missing.add(block.phonemes.join(""));
+      }
+    }
+  }
+  assert.deepEqual([...missing], []);
+});
+
 test("oxygen follows the sound-to-spelling route", () => {
   const result = C.analyzeSoundSpelling("oxigen", "oxygen", "/ˈɒksɪdʒən/");
   assert.deepEqual(

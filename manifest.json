@@ -27,7 +27,7 @@
         "https://ielts.itongzhuo.com/*",
         "https://www.idictation.cn/*"
       ],
-      "js": ["lib/phonetics.js", "content.js", "audio-preload.js"],
+      "js": ["lib/phonetics.js", "content.js"],
       "run_at": "document_idle"
     }
   ],

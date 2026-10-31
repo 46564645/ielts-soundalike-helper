@@ -1048,6 +1048,12 @@
       ...regularItems.filter((item) => P.normalizeWord(item.word) !== typedKey)
     ].slice(0, 5);
     audioShortcuts.candidates = items.map((item) => ({ url: item.audioUrl, word: item.word }));
+    // Prepare only known visible words; do not reveal future dictation answers.
+    const prefetchWords = [packet.target?.word, ...items.map((item) => item.word)]
+      .filter((word) => typeof word === "string" && word.trim()).slice(0, 20);
+    if (prefetchWords.length) {
+      sendMessage({ type: "PREFETCH_AUDIO_WORDS", words: prefetchWords, accent: settings.accent }).catch(() => {});
+    }
     countNode.textContent = `${items.length}/5`;
     if (!items.length) {
       container.append(element("div", "本题没有符合门槛的近音词或形近词。", "empty"));

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "听写辨音助手",
-  "version": "2.9.0",
+  "version": "2.9.1",
   "description": "雅思听写与精听辅助：辨音对比、口语词组提取、发音收藏及 DeepSeek 解释。",
   "permissions": ["storage", "activeTab", "tts"],
   "host_permissions": [

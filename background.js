@@ -21,6 +21,12 @@ const SPEAKING_JOB_KEY = "speakingExtractionJobV1";
 const SPEAKING_MODEL = "deepseek-v4-pro";
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "PREFETCH_AUDIO_WORDS") {
+    prefetchAudioWords(message.words, message.accent)
+      .then((count) => sendResponse({ ok: true, count }))
+      .catch(() => sendResponse({ ok: false, count: 0 }));
+    return true;
+  }
   if (message?.type === "PREPARE_WORD") {
     prepareWord(message.word, message.accent)
       .then((payload) => sendResponse({ ok: true, ...payload }))
@@ -96,6 +102,30 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   return false;
 });
+
+// Prefetch is intentionally bounded and never triggers speech or page playback.
+async function prefetchAudioWords(rawWords, rawAccent) {
+  const accent = normalizeAccent(rawAccent);
+  const unique = [...new Set((Array.isArray(rawWords) ? rawWords : [])
+    .filter((word) => typeof word === "string" && /^[a-z][a-z' -]{0,70}$/i.test(word))
+    .map((word) => P.normalizeWord(word)))].filter(Boolean).slice(0, 20);
+  let cursor = 0;
+  let count = 0;
+  async function worker() {
+    while (cursor < unique.length) {
+      const word = unique[cursor++];
+      const item = BY_WORD.get(word) || { word, ukSpeech: "" };
+      try {
+        await fetchAudio(item, accent);
+        count++;
+      } catch {
+        // A failed prefetch must never interrupt the website or force TTS playback.
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(3, unique.length) }, worker));
+  return count;
+}
 
 async function getComparisonAudio(rawWord, rawAccent) {
   const word = String(rawWord || "").trim();

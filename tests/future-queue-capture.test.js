@@ -10,9 +10,18 @@ function createHarness(payload) {
     setAttribute(key, value) { attrs.set(key, value); },
     getAttribute(key) { return attrs.get(key) || null; }
   };
+  const listeners = new Map();
   const document = {
     documentElement,
-    dispatchEvent(event) { dispatched.push(event.type); }
+    addEventListener(type, listener) {
+      const group = listeners.get(type) || [];
+      group.push(listener);
+      listeners.set(type, group);
+    },
+    dispatchEvent(event) {
+      dispatched.push(event.type);
+      for (const listener of listeners.get(event.type) || []) listener(event);
+    }
   };
   class MockXHR {}
   MockXHR.prototype.open = function () {};
@@ -27,6 +36,7 @@ function createHarness(payload) {
     XMLHttpRequest: MockXHR,
     document,
     CustomEvent: class { constructor(type) { this.type = type; } },
+    Event: class { constructor(type) { this.type = type; } },
     URL,
     location: {
       hostname: "www.idictation.cn",

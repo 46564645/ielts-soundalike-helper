@@ -31,6 +31,8 @@
   let futureCache = { phase: "waiting", total: 0, done: 0, ready: 0, memory: 0, failed: 0, error: "" };
   let futureCacheWords = [];
   const futureCacheStatuses = new Map();
+  const futureCacheFailureReasons = new Map();
+  const futureCacheStorageReasons = new Map();
 
   chrome.storage.sync.get(DEFAULTS, (saved) => {
     settings = { ...DEFAULTS, ...saved };
@@ -1101,6 +1103,8 @@
     futureCacheQueueKey = key;
     futureCacheWords = words;
     futureCacheStatuses.clear();
+    futureCacheFailureReasons.clear();
+    futureCacheStorageReasons.clear();
     const generation = ++futureCacheGeneration;
     futureCache = { phase: "loading", total: words.length, operationTotal: words.length, done: 0, ready: 0, memory: 0, failed: 0, error: "" };
     updateFutureCacheDisplay();
@@ -1109,7 +1113,7 @@
 
   function retryFailedFutureAudio() {
     if (futureCache.phase === "loading" || !futureCacheWords.length) return;
-    const failed = futureCacheWords.filter((word) => futureCacheStatuses.get(word) === "failed");
+    const failed = futureCacheWords.filter((word) => ["failed", "memory"].includes(futureCacheStatuses.get(word)));
     if (!failed.length) return;
     const generation = ++futureCacheGeneration;
     futureCache.phase = "loading";
@@ -1143,14 +1147,22 @@
         if (generation !== futureCacheGeneration) return;
         if (!response?.ok) throw new Error(response?.error || "扩展后台没有完成音频预加载");
         const statuses = response.statuses || {};
-        for (const word of batch) futureCacheStatuses.set(word, statuses[word] || "failed");
-        if (response.error) futureCache.error = futureCache.error
-          ? futureCache.error + "；" + response.error : response.error;
+        for (const word of batch) {
+          const status = statuses[word] || "failed";
+          futureCacheStatuses.set(word, status);
+          futureCacheFailureReasons.delete(word);
+          futureCacheStorageReasons.delete(word);
+          if (status === "failed") futureCacheFailureReasons.set(word, response.reasons?.[word] || "下载失败（未收到详细原因）");
+          else if (status === "memory") futureCacheStorageReasons.set(word, response.storageReasons?.[word] || "暂时只能存入内存");
+        }
       } catch (error) {
         if (generation !== futureCacheGeneration) return;
-        for (const word of batch) futureCacheStatuses.set(word, "failed");
         const reason = error instanceof Error ? error.message : String(error);
-        futureCache.error = futureCache.error ? futureCache.error + "；" + reason : reason;
+        for (const word of batch) {
+          futureCacheStatuses.set(word, "failed");
+          futureCacheStorageReasons.delete(word);
+          futureCacheFailureReasons.set(word, "扩展通信失败：" + reason.slice(0, 80));
+        }
       }
       futureCache.done += batch.length;
       updateFutureCacheCounts();
@@ -1171,18 +1183,34 @@
     return "已存 " + ready + "/" + total + " · 临时 " + memory + " · 失败 " + failed;
   }
 
+  function summarizeCacheReasons(records) {
+    const totals = new Map();
+    for (const reason of records.values()) {
+      const label = String(reason || "原因未知").slice(0, 70);
+      totals.set(label, (totals.get(label) || 0) + 1);
+    }
+    return Array.from(totals, ([reason, count]) => reason + " " + count + " 个").join("；");
+  }
+
   function updateFutureCacheDisplay() {
     if (!IS_IDICTATION || location.pathname !== "/home") return;
     const label = futureCacheLabel();
-    const baseNote = "缓存的是后续单词的词典备用发音，不是爱听写原始录音。";
-    const detail = futureCache.error
-      ? "失败原因：" + futureCache.error.slice(0, 220) + "。点击「重试失败项」可再试。"
-      : baseNote;
+    const baseNote = "这是后续单词的词典备用音频，不是爱听写原录音。";
+    const downloadProblems = summarizeCacheReasons(futureCacheFailureReasons);
+    const storageProblems = summarizeCacheReasons(futureCacheStorageReasons);
+    // Do not show the actual upcoming words before answers have been judged.
+    const detail = [
+      baseNote,
+      downloadProblems ? "下载未成功：" + downloadProblems : "",
+      storageProblems ? "已下载但未持久保存：" + storageProblems : "",
+      (futureCache.failed || futureCache.memory) && futureCache.phase !== "loading"
+        ? "可以点击「重试未存项」。" : ""
+    ].filter(Boolean).join(" ");
     if (overlayUi?.futureCacheStatus) {
       if (overlayUi.futureCacheStatus.textContent !== label) overlayUi.futureCacheStatus.textContent = label;
       overlayUi.futureCacheStatus.title = detail;
       overlayUi.futureCacheDetail.textContent = detail;
-      overlayUi.futureCacheRetry.hidden = futureCache.failed === 0;
+      overlayUi.futureCacheRetry.hidden = futureCache.failed + futureCache.memory === 0;
       overlayUi.futureCacheRetry.disabled = futureCache.phase === "loading";
     }
     if (!futureCacheBadge) {
@@ -1463,7 +1491,7 @@
         </header>
         <div class="body normal-body">
           <div class="result-line"><span class="status"></span><span class="accent"></span></div>
-          <div class="future-cache-bar"><span>本轮听写备用发音</span><span class="future-cache-status">等待练习队列</span><button class="future-cache-retry" type="button" hidden>重试失败项</button></div><div class="future-cache-detail" role="status">缓存的是词典备用发音，不是爱听写原录音。</div>
+          <div class="future-cache-bar"><span>本轮听写备用发音</span><span class="future-cache-status">等待练习队列</span><button class="future-cache-retry" type="button" hidden>重试未存项</button></div><div class="future-cache-detail" role="status">缓存的是词典备用发音，不是爱听写原录音。</div>
           <section class="target-card">
             <div class="target-top"><div><div class="word-line"><strong class="word"></strong><span class="book"></span></div><div class="ipa target-ipa"></div></div><button class="play-target audio-button" type="button" title="播放完整单词">🔊<kbd class="shortcut-key">·</kbd></button></div>
             <p class="meaning"></p><p class="attempt"></p>

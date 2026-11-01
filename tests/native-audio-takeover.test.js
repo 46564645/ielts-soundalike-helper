@@ -104,6 +104,12 @@ function harness() {
   h.root.setAttribute("data-ielts-audio-takeover-mode", "auto");
   h.root.setAttribute("data-ielts-current-backup-ready", "yes");
 
+  // A manual click before the website actually uses an HTML media player
+  // must not risk overlapping an unknown Web Audio player.
+  h.document.dispatchEvent({ type: "ielts-native-audio-request-backup" });
+  assert.equal(h.emitted.filter((e) => e.type === "takeover").length, 0);
+  assert.equal(h.emitted.at(-1).type, "native-unobserved");
+
   const ok = new h.FakeMedia();
   await ok.play();
   assert.equal(ok.playCount, 1, "auto mode must keep the original site audio");

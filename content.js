@@ -1055,7 +1055,7 @@
     const words = [...new Set((Array.isArray(payload?.words) ? payload.words : [])
       .filter((word) => typeof word === "string" && /^[a-z][a-z' -]{0,65}$/i.test(word))
       .map((word) => P.normalizeWord(word)))].filter(Boolean).slice(0, 50);
-    if (words.length < 3) return;
+    if (!words.length) return;
     const key = words.join("|") + "|" + settings.accent;
     if (key === futureCacheQueueKey) return;
     futureCacheQueueKey = key;

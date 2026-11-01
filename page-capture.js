@@ -269,8 +269,11 @@
     function findSiteSpeakerControl(target) {
       if (!target || typeof target.closest !== "function") return null;
       const icon = target.closest("svg,i,[class*='volume'],[class*='speaker'],[class*='sound']");
+      // Some site versions use a clickable div rather than a real button.
+      // Only accept that div when the click is on an actual speaker-style icon.
       const control = target.closest("button,[role='button']") ||
-        icon?.closest?.("button,[role='button']") || null;
+        (icon && icon.closest?.("button,[role='button'],[class*='cursor-pointer'],[onclick]")) ||
+        null;
       if (!control || !control.closest("main")) return null;
       const label = [
         control.getAttribute("aria-label"), control.getAttribute("title"),

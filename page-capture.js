@@ -114,6 +114,8 @@
     let backupActive = false;
     let watchdog = null;
     let lastBackupReplay = 0;
+    let backupTicket = 0;
+    let backupStartTimer = null;
 
     function root() { return document.documentElement; }
     function mode() {
@@ -128,23 +130,44 @@
         String(media?.tagName || "").toLowerCase() === "audio" &&
         !media.hasAttribute("data-ielts-helper-backup");
     }
-    function emit(type, reason) {
+    function emit(type, reason, ticket = 0) {
       const el = root();
       if (!el) return;
       el.setAttribute("data-ielts-native-audio-event",
-        JSON.stringify({ type, reason: reason || "", at: Date.now() }));
+        JSON.stringify({ type, reason: reason || "", ticket, at: Date.now() }));
       document.dispatchEvent(new Event("ielts-native-audio-event"));
     }
     function clearWatchdog() {
       if (watchdog !== null) clearTimeout(watchdog);
       watchdog = null;
     }
+    function clearBackupStartTimer() {
+      if (backupStartTimer !== null) clearTimeout(backupStartTimer);
+      backupStartTimer = null;
+    }
     function activateFallback(reason) {
       if (mode() === "off" || !ready()) return false;
       clearWatchdog();
+      clearBackupStartTimer();
       backupActive = true;
       try { activeAudio?.pause(); } catch {}
-      emit("takeover", reason);
+      const ticket = ++backupTicket;
+      emit("takeover", reason, ticket);
+      // If the content-script listener is unavailable or iOS blocks audio,
+      // do not leave the website player muted indefinitely.
+      backupStartTimer = setTimeout(() => {
+        backupStartTimer = null;
+        if (!backupActive || ticket !== backupTicket) return;
+        if (root()?.getAttribute("data-ielts-fallback-started") === String(ticket)) return;
+        backupActive = false;
+        root()?.setAttribute("data-ielts-fallback-cancel", String(ticket));
+        document.dispatchEvent(new Event("ielts-native-audio-cancel-backup"));
+        emit("backup-timeout", "备用发音没有成功启动，已尝试恢复原声");
+        const native = activeAudio;
+        if (native) {
+          try { Promise.resolve(nativePlay.call(native)).catch(() => {}); } catch {}
+        }
+      }, 3000);
       return true;
     }
     function scheduleWatchdog(media, id, ms = 2100) {
@@ -201,7 +224,7 @@
         // to start underneath it. Throttle duplicate framework play calls.
         if (ready() && Date.now() - lastBackupReplay > 250) {
           lastBackupReplay = Date.now();
-          emit("takeover", "再次播放备用发音");
+          activateFallback("再次播放备用发音");
         }
         return Promise.resolve();
       }
@@ -234,6 +257,8 @@
 
     document.addEventListener("ielts-native-audio-reset", () => {
       attemptId++;
+      backupTicket++;
+      clearBackupStartTimer();
       backupActive = false;
       nativePlaying = false;
       activeAudio = null;
@@ -242,6 +267,8 @@
     document.addEventListener("ielts-native-audio-mode-change", () => {
       if (mode() === "off") {
         backupActive = false;
+        backupTicket++;
+        clearBackupStartTimer();
         clearWatchdog();
       }
     });
@@ -264,6 +291,8 @@
     });
     document.addEventListener("ielts-native-audio-backup-failed", () => {
       backupActive = false;
+      backupTicket++;
+      clearBackupStartTimer();
       clearWatchdog();
       // A backup that fails must never prevent the user using the site.
       const native = activeAudio;

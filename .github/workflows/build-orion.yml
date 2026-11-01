@@ -17,6 +17,7 @@ jobs:
           node --check background.js
           node --check content.js
           node --check page-capture.js
+          for file in tests/*.test.js; do node "$file"; done
       - name: Build extension ZIP
         run: |
           mkdir -p dist

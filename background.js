@@ -697,7 +697,16 @@ async function fetchAudio(item, accent) {
 async function loadAudio(item, accent) {
   const key = `${accent}:${P.normalizeWord(item.word)}`;
   if (!P.normalizeWord(item.word)) return "";
-  if (audioCache.has(key)) return audioCache.get(key);
+  if (audioCache.has(key)) {
+    // In-memory audio is playable but might not survive a worker restart.
+    // Let an explicit retry attempt the storage operation again.
+    if (audioPersistence.get(key) === false) {
+      const restored = await storeAudioLocally(key, audioCache.get(key));
+      audioPersistence.set(key, restored);
+      if (restored) audioStorageIssues.delete(key);
+    }
+    return audioCache.get(key);
+  }
   // On iOS Safari/Orion, the CacheStorage API may be absent. Keep a bounded
   // local-storage copy so retrying a word still works after worker suspension.
   try {

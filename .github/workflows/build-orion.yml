@@ -1,0 +1,30 @@
+name: Build Orion iOS ZIP
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/audio-preload-safe-fallback
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check manifest and JavaScript syntax
+        run: |
+          node -e "const m=require('./manifest.json'); if(m.manifest_version!==3) process.exit(1); console.log(m.version)"
+          node --check background.js
+          node --check content.js
+          node --check page-capture.js
+      - name: Build extension ZIP
+        run: |
+          mkdir -p dist
+          zip -q -r "dist/ielts-soundalike-helper-orion.zip" . \
+            -x '.git/*' '.github/*' 'dist/*' 'node_modules/*' '*.command' '*.ps1' '*.sh'
+          unzip -t "dist/ielts-soundalike-helper-orion.zip" | tail -n 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ielts-soundalike-helper-orion
+          path: dist/ielts-soundalike-helper-orion.zip
+          retention-days: 30

@@ -1101,6 +1101,313 @@
   // Prefetch dictionaries for the actual study queue that the website has
   // already delivered, rather than guessing future questions from similar words.
   // No upcoming spelling is displayed or sent to the extension UI.
+
+  // Playback takeover is deliberately separate from the dictionary prefetch
+  // count. No unanswered spelling or resolved word is shown in the controls.
+  function normalizeStudyAudioMode(value) {
+    return value === "off" || value === "force" ? value : "auto";
+  }
+
+  function isStudyNativeBridgeReady() {
+    return document.documentElement?.getAttribute("data-ielts-native-audio-bridge") === "html-media-v1";
+  }
+
+  function hasStudyBackup() {
+    return Boolean(studyBackup.word && (
+      studyBackup.url.startsWith("data:") ||
+      (studyBackup.kind === "tts" && typeof SpeechSynthesisUtterance !== "undefined" &&
+       !!window.speechSynthesis)
+    ));
+  }
+
+  function syncStudyBackupReady() {
+    const root = document.documentElement;
+    if (!root) return;
+    const next = hasStudyBackup() ? "yes" : "no";
+    const previous = root.getAttribute("data-ielts-current-backup-ready");
+    if (previous === next) return;
+    root.setAttribute("data-ielts-current-backup-ready", next);
+    if (next === "yes") document.dispatchEvent(new Event("ielts-native-audio-ready"));
+  }
+
+  function applyStudyAudioMode() {
+    if (!IS_IDICTATION) return;
+    const mode = normalizeStudyAudioMode(settings.audioTakeoverMode);
+    document.documentElement?.setAttribute("data-ielts-audio-takeover-mode", mode);
+    syncStudyBackupReady();
+    document.dispatchEvent(new Event("ielts-native-audio-mode-change"));
+    if (mode === "off") stopStudyBackupPlayback();
+    renderStudyAudioControls();
+  }
+
+  function stopStudyBackupPlayback() {
+    if (studyBackupAudio) {
+      try { studyBackupAudio.pause(); studyBackupAudio.currentTime = 0; } catch {}
+      studyBackupAudio = null;
+    }
+    if (studyBackupVoice) {
+      try { window.speechSynthesis.cancel(); } catch {}
+      studyBackupVoice = null;
+    }
+    studyBackupPlaying = false;
+  }
+
+  function startNewStudyQuestion(signature) {
+    if (!signature || signature === studyQuestionSignature) return;
+    studyQuestionSignature = signature;
+    stopStudyBackupPlayback();
+    studyBackup = { word: "", key: "", url: "", kind: "none",
+      loading: false, run: studyBackup.run + 1, error: "" };
+    studyNativeState = "等待当前题原声";
+    document.documentElement?.setAttribute("data-ielts-current-backup-ready", "no");
+    document.dispatchEvent(new Event("ielts-native-audio-reset"));
+    renderStudyAudioControls();
+  }
+
+  function prepareStudyBackup(rawWord, trusted) {
+    const word = String(rawWord || "").trim();
+    const key = P.normalizeWord(word) + "|" + settings.accent;
+    if (!trusted || !P.normalizeWord(word)) {
+      // The clue may describe multiple homophones. Never play a guessed word.
+      if (studyBackup.word) {
+        studyBackup = { word: "", key: "", url: "", kind: "none",
+          loading: false, run: studyBackup.run + 1, error: "当前词无法可靠识别，保留原声" };
+        syncStudyBackupReady();
+        renderStudyAudioControls();
+      }
+      return;
+    }
+    if (key === studyBackup.key) return;
+    const canSpeak = typeof SpeechSynthesisUtterance !== "undefined" && !!window.speechSynthesis;
+    const run = studyBackup.run + 1;
+    studyBackup = { word, key, url: "", kind: canSpeak ? "tts" : "none",
+      loading: true, run, error: "" };
+    syncStudyBackupReady();
+    renderStudyAudioControls();
+    // A word already downloaded by the future-queue prefetch returns a data
+    // URL immediately; a remote dictionary URL is NOT counted as cached.
+    sendMessage({ type: "GET_COMPARISON_AUDIO", word, accent: settings.accent })
+      .then((response) => {
+        if (run !== studyBackup.run || key !== studyBackup.key) return;
+        const audioUrl = String(response?.audioUrl || "");
+        const isCached = /^data:(?:audio\/|application\/octet-stream|binary\/octet-stream)/i.test(audioUrl);
+        if (response?.ok && isCached) {
+          studyBackup.url = audioUrl;
+          studyBackup.kind = "cached";
+          studyBackup.error = "";
+        } else {
+          studyBackup.error = canSpeak ? "词典备用音频未缓存，使用设备语音" :
+            "备用音频不可用，继续使用爱听写原声";
+        }
+        studyBackup.loading = false;
+        syncStudyBackupReady();
+        renderStudyAudioControls();
+      })
+      .catch((error) => {
+        if (run !== studyBackup.run) return;
+        studyBackup.loading = false;
+        studyBackup.error = "备用加载失败：" + String(error?.message || error).slice(0, 70);
+        syncStudyBackupReady();
+        renderStudyAudioControls();
+      });
+  }
+
+  function onNativeStudyAudioEvent() {
+    const root = document.documentElement;
+    const raw = root?.getAttribute("data-ielts-native-audio-event");
+    if (!raw) return;
+    root.removeAttribute("data-ielts-native-audio-event");
+    let payload;
+    try { payload = JSON.parse(raw); } catch { return; }
+    if (!payload || !settings.enabled) return;
+    if (payload.type === "takeover") {
+      studyNativeState = "正在切换备用发音";
+      playCurrentStudyBackup();
+    } else if (payload.type === "native-playing") {
+      studyNativeState = "爱听写原声正常";
+    } else if (payload.type === "attempt") {
+      studyNativeState = "检测原声音频";
+    } else if (payload.type === "native-error" || payload.type === "waiting") {
+      studyNativeState = String(payload.reason || "原声未正常播放");
+    } else if (payload.type === "bridge-ready") {
+      studyNativeState = "已连接原声监听";
+    }
+    renderStudyAudioControls();
+  }
+
+  function reportStudyBackupFailure(reason) {
+    stopStudyBackupPlayback();
+    studyNativeState = "备用发音失败：" + reason;
+    studyBackup.url = "";
+    studyBackup.kind = "none";
+    studyBackup.error = reason;
+    syncStudyBackupReady();
+    document.dispatchEvent(new Event("ielts-native-audio-backup-failed"));
+    renderStudyAudioControls();
+  }
+
+  function speakStudyBackup() {
+    if (!studyBackup.word || typeof SpeechSynthesisUtterance === "undefined" ||
+        !window.speechSynthesis) {
+      reportStudyBackupFailure("设备没有可用英语语音");
+      return;
+    }
+    try {
+      const speech = new SpeechSynthesisUtterance(studyBackup.word);
+      speech.lang = settings.accent === "uk" ? "en-GB" : "en-US";
+      speech.rate = 0.9;
+      studyBackupVoice = speech;
+      speech.onstart = () => {
+        if (studyBackupVoice !== speech) return;
+        studyBackupPlaying = true;
+        studyNativeState = "设备语音已接管";
+        renderStudyAudioControls();
+      };
+      speech.onend = () => {
+        if (studyBackupVoice !== speech) return;
+        studyBackupVoice = null;
+        studyBackupPlaying = false;
+        renderStudyAudioControls();
+      };
+      speech.onerror = () => {
+        if (studyBackupVoice !== speech) return;
+        studyBackupVoice = null;
+        reportStudyBackupFailure("设备语音无法播放");
+      };
+      window.speechSynthesis.speak(speech);
+      studyNativeState = "尝试设备英语语音";
+    } catch (error) {
+      reportStudyBackupFailure(String(error?.message || "语音不可用").slice(0, 80));
+    }
+  }
+
+  function playCurrentStudyBackup() {
+    if (!hasStudyBackup()) {
+      reportStudyBackupFailure("当前题没有可靠的备用读音");
+      return;
+    }
+    stopStudyBackupPlayback();
+    if (studyBackup.kind !== "cached" || !studyBackup.url) {
+      speakStudyBackup();
+      return;
+    }
+    try {
+      const audio = new Audio(studyBackup.url);
+      audio.setAttribute("data-ielts-helper-backup", "true");
+      studyBackupAudio = audio;
+      audio.addEventListener("playing", () => {
+        if (studyBackupAudio !== audio) return;
+        studyBackupPlaying = true;
+        studyNativeState = "缓存备用发音已接管";
+        renderStudyAudioControls();
+      });
+      audio.addEventListener("ended", () => {
+        if (studyBackupAudio !== audio) return;
+        studyBackupPlaying = false;
+        studyBackupAudio = null;
+        renderStudyAudioControls();
+      }, { once: true });
+      audio.play().catch(() => {
+        if (studyBackupAudio !== audio) return;
+        studyBackupAudio = null;
+        // A corrupt/blocked cached clip can still fall back to device speech.
+        speakStudyBackup();
+      });
+    } catch {
+      speakStudyBackup();
+    }
+  }
+
+  function chooseStudyAudioMode(nextMode) {
+    if (!IS_IDICTATION || !settings.enabled) return;
+    const mode = normalizeStudyAudioMode(nextMode);
+    settings.audioTakeoverMode = mode;
+    applyStudyAudioMode();
+    chrome.storage.sync.set({ audioTakeoverMode: mode });
+    // A direct click remains a user gesture, enabling audio playback on iOS.
+    if (mode === "force" && hasStudyBackup() && isStudyNativeBridgeReady()) {
+      document.dispatchEvent(new Event("ielts-native-audio-request-backup"));
+    }
+  }
+
+  function requestStudyBackupReplay() {
+    if (!isStudyNativeBridgeReady() || !hasStudyBackup()) return;
+    if (normalizeStudyAudioMode(settings.audioTakeoverMode) === "off") return;
+    document.dispatchEvent(new Event("ielts-native-audio-request-backup"));
+  }
+
+  function ensureStudyAudioControls() {
+    if (!IS_IDICTATION || location.pathname !== "/home") return;
+    if (!studyTakeoverUi) {
+      const root = document.createElement("div");
+      root.id = "ielts-audio-takeover-controls";
+      root.style.cssText = "position:fixed;top:calc(env(safe-area-inset-top) + 123px);right:8px;z-index:2147483641;width:min(286px,calc(100vw - 16px));padding:8px;border-radius:12px;background:rgba(17,37,52,.94);color:#fff;box-shadow:0 4px 18px #0002;font:11px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;display:flex;flex-direction:column;gap:5px;";
+      const title = document.createElement("div");
+      title.textContent = "🔊 当前听写音频";
+      title.style.cssText = "font-weight:700;";
+      const modes = document.createElement("div");
+      modes.style.cssText = "display:flex;gap:5px;align-items:center;";
+      const buttons = {};
+      for (const [value, label] of [["off","原声"],["auto","自动保底"],["force","接管"]]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        button.dataset.mode = value;
+        button.style.cssText = "flex:1;min-width:0;padding:6px 3px;border:1px solid #476478;border-radius:7px;background:#29445a;color:#fff;font:inherit;cursor:pointer;touch-action:manipulation;";
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          chooseStudyAudioMode(value);
+        });
+        modes.appendChild(button);
+        buttons[value] = button;
+      }
+      const replay = document.createElement("button");
+      replay.type = "button";
+      replay.textContent = "▶ 当前词备用重播";
+      replay.style.cssText = "width:100%;padding:6px 5px;border:1px solid #628d9d;border-radius:7px;background:#315b6f;color:#fff;font:inherit;cursor:pointer;touch-action:manipulation;";
+      replay.addEventListener("click", (event) => {
+        event.stopPropagation();
+        requestStudyBackupReplay();
+      });
+      const status = document.createElement("div");
+      status.setAttribute("role", "status");
+      status.style.cssText = "color:#d5e2e9;font-size:10px;overflow-wrap:anywhere;";
+      root.append(title, modes, replay, status);
+      document.documentElement.appendChild(root);
+      studyTakeoverUi = { root, buttons, replay, status };
+    }
+    renderStudyAudioControls();
+  }
+
+  function renderStudyAudioControls() {
+    const ui = studyTakeoverUi;
+    if (!ui) return;
+    const visible = settings.enabled && isLearningMode() && location.pathname === "/home";
+    const display = visible ? "flex" : "none";
+    if (ui.root.style.display !== display) ui.root.style.display = display;
+    if (!visible) return;
+    const mode = normalizeStudyAudioMode(settings.audioTakeoverMode);
+    const bridgeReady = isStudyNativeBridgeReady();
+    for (const [name, button] of Object.entries(ui.buttons)) {
+      const selected = mode === name;
+      const color = selected ? "#c8f1ed" : "#fff";
+      const background = selected ? "#126b75" : "#29445a";
+      if (button.style.color !== color) button.style.color = color;
+      if (button.style.backgroundColor !== background) button.style.backgroundColor = background;
+      button.setAttribute("aria-pressed", String(selected));
+      button.disabled = name === "force" && !bridgeReady;
+    }
+    const replayDisabled = !bridgeReady || !hasStudyBackup() || mode === "off";
+    if (ui.replay.disabled !== replayDisabled) ui.replay.disabled = replayDisabled;
+    const backupLabel = !studyBackup.word ? "当前词尚未可靠识别" :
+      studyBackup.kind === "cached" ? "缓存音频已准备" :
+      studyBackup.kind === "tts" ? "设备语音备用" : "备用不可用";
+    const bridgeLabel = bridgeReady ? "" : " · 网站播放器监听未就绪";
+    const label = backupLabel + bridgeLabel + " · " + studyNativeState;
+    if (ui.status.textContent !== label) ui.status.textContent = label;
+    ui.status.title = studyBackup.error || "自动模式在原声缓冲超过约2秒或播放出错时才接管；强制接管对后续题持续有效";
+  }
+
   function consumeFutureWordQueue() {
     if (!IS_IDICTATION || location.pathname !== "/home") return;
     const root = document.documentElement;

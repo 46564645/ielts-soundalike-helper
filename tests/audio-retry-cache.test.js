@@ -19,6 +19,7 @@ function harness(shared) {
     clearTimeout,
     fetch: async () => {
       shared.downloadCount++;
+      if (shared.networkDown) throw new Error("Failed to fetch");
       return { ok: true, blob: async () => new Blob([Buffer.from("audio test bytes")], { type: "audio/mpeg" }) };
     },
     chrome: {
@@ -68,6 +69,9 @@ function harness(shared) {
   assert.equal(a.total, 2, "duplicates in a retry queue must be deduplicated");
   assert.equal(a.count, 2, "downloaded audio should be persisted");
   assert.equal(shared.downloadCount, 2);
+  const savedAudio = shared.storage.get("wordAudioV2:us:again");
+  assert.match(savedAudio, /^data:audio\/mpeg;base64,/);
+  assert.equal(Buffer.from(savedAudio.split(",")[1], "base64").toString(), "audio test bytes");
   const b = await first.send("PREFETCH_AUDIO_WORDS", ["again", "mistake"]);
   assert.equal(b.count, 2);
   assert.equal(shared.downloadCount, 2, "retry must not re-download already cached words");
@@ -83,5 +87,13 @@ function harness(shared) {
   assert.equal(d.count, 1);
   assert.equal(e.count, 1);
   assert.equal(shared.downloadCount, 3, "concurrent retry requests must share one download");
+  shared.networkDown = true;
+  const failed = await first.send("PREFETCH_AUDIO_WORDS", ["unavailable"]);
+  assert.equal(failed.statuses.unavailable, "failed");
+  assert.match(failed.error, /网络或扩展权限限制/);
+  shared.networkDown = false;
+  const recovered = await first.send("PREFETCH_AUDIO_WORDS", ["unavailable"]);
+  assert.equal(recovered.statuses.unavailable, "ready", "manual retry must recover without reinstalling");
+
   console.log("Audio retry cache and persistence tests passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -14,14 +14,9 @@ function harness(shared) {
     AbortSignal,
     URL,
     console,
-    FileReader: class {
-      readAsDataURL(blob) {
-        blob.arrayBuffer().then((buf) => {
-          this.result = "data:" + (blob.type || "application/octet-stream") + ";base64," + Buffer.from(buf).toString("base64");
-          this.onloadend();
-        }).catch((error) => { this.error = error; this.onerror(); });
-      }
-    },
+    AbortController,
+    setTimeout,
+    clearTimeout,
     fetch: async () => {
       shared.downloadCount++;
       return { ok: true, blob: async () => new Blob([Buffer.from("audio test bytes")], { type: "audio/mpeg" }) };

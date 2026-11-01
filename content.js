@@ -1104,35 +1104,61 @@
     const key = words.join("|") + "|" + settings.accent;
     if (key === futureCacheQueueKey) return;
     futureCacheQueueKey = key;
+    futureCacheWords = words;
+    futureCacheStatuses.clear();
     const generation = ++futureCacheGeneration;
-    futureCache = { phase: "loading", total: words.length, done: 0, ready: 0, memory: 0, failed: 0, error: "" };
+    futureCache = { phase: "loading", total: words.length, operationTotal: words.length, done: 0, ready: 0, memory: 0, failed: 0, error: "" };
     updateFutureCacheDisplay();
     void prefetchStudyQueueInBatches(words, generation);
   }
 
+  function retryFailedFutureAudio() {
+    if (futureCache.phase === "loading" || !futureCacheWords.length) return;
+    const failed = futureCacheWords.filter((word) => futureCacheStatuses.get(word) === "failed");
+    if (!failed.length) return;
+    const generation = ++futureCacheGeneration;
+    futureCache.phase = "loading";
+    futureCache.operationTotal = failed.length;
+    futureCache.done = 0;
+    futureCache.error = "";
+    updateFutureCacheDisplay();
+    void prefetchStudyQueueInBatches(failed, generation);
+  }
+
+  function updateFutureCacheCounts() {
+    futureCache.ready = 0;
+    futureCache.memory = 0;
+    futureCache.failed = 0;
+    for (const word of futureCacheWords) {
+      const status = futureCacheStatuses.get(word);
+      if (status === "ready") futureCache.ready++;
+      else if (status === "memory") futureCache.memory++;
+      else if (status === "failed") futureCache.failed++;
+    }
+  }
+
   async function prefetchStudyQueueInBatches(words, generation) {
-    // Short batches avoid holding an Orion / iOS MV3 message for a full 50-word download.
-    for (let i = 0; i < words.length; i += 8) {
+    // Keep messages short so the Orion MV3 worker can return a result before
+    // iOS suspends it. Retry words must not be double-counted.
+    for (let i = 0; i < words.length; i += 4) {
       if (generation !== futureCacheGeneration || location.pathname !== "/home") return;
-      const batch = words.slice(i, i + 8);
+      const batch = words.slice(i, i + 4);
       try {
         const response = await sendMessage({ type: "PREFETCH_AUDIO_WORDS", words: batch, accent: settings.accent });
         if (generation !== futureCacheGeneration) return;
         if (!response?.ok) throw new Error(response?.error || "扩展后台没有完成音频预加载");
         const statuses = response.statuses || {};
-        for (const word of batch) {
-          const status = statuses[word] || "failed";
-          if (status === "ready") futureCache.ready++;
-          else if (status === "memory") futureCache.memory++;
-          else futureCache.failed++;
-        }
-        if (response.error && !futureCache.error) futureCache.error = response.error;
+        for (const word of batch) futureCacheStatuses.set(word, statuses[word] || "failed");
+        if (response.error) futureCache.error = futureCache.error
+          ? futureCache.error + "；" + response.error : response.error;
       } catch (error) {
         if (generation !== futureCacheGeneration) return;
-        futureCache.failed += batch.length;
-        if (!futureCache.error) futureCache.error = error instanceof Error ? error.message : String(error);
+        for (const word of batch) futureCacheStatuses.set(word, "failed");
+        const reason = error instanceof Error ? error.message : String(error);
+        futureCache.error = futureCache.error ? futureCache.error + "；" + reason : reason;
       }
       futureCache.done += batch.length;
+      updateFutureCacheCounts();
       updateFutureCacheDisplay();
     }
     if (generation !== futureCacheGeneration) return;
@@ -1143,28 +1169,41 @@
   function futureCacheLabel() {
     if (futureCache.phase === "waiting") return "未发现练习后续队列";
     const { ready, memory, done, total, failed } = futureCache;
-    if (futureCache.phase === "loading") return `后续词典音频 ${done}/${total} · 已存 ${ready}`;
-    return `后续词典音频 ${ready}/${total} 已存${memory ? ` · 临时 ${memory}` : ""}${failed ? ` · 失败 ${failed}` : ""}`;
+    if (futureCache.phase === "loading") {
+      return "准备 " + done + "/" + (futureCache.operationTotal || total) +
+        " · 已存 " + ready + " · 临时 " + memory + " · 失败 " + failed;
+    }
+    return "已存 " + ready + "/" + total + " · 临时 " + memory + " · 失败 " + failed;
   }
 
   function updateFutureCacheDisplay() {
     if (!IS_IDICTATION || location.pathname !== "/home") return;
     const label = futureCacheLabel();
+    const baseNote = "缓存的是后续单词的词典备用发音，不是爱听写原始录音。";
     const detail = futureCache.error
-      ? `词典备份缓存异常：${futureCache.error}`
-      : "提前缓存网站已提供的练习单词的词典备用发音，不是爱听写原录音；不会显示未答题答案";
+      ? "失败原因：" + futureCache.error.slice(0, 220) + "。点击「重试失败项」可再试。"
+      : baseNote;
     if (overlayUi?.futureCacheStatus) {
-      overlayUi.futureCacheStatus.textContent = label;
+      if (overlayUi.futureCacheStatus.textContent !== label) overlayUi.futureCacheStatus.textContent = label;
       overlayUi.futureCacheStatus.title = detail;
+      overlayUi.futureCacheDetail.textContent = detail;
+      overlayUi.futureCacheRetry.hidden = futureCache.failed === 0;
+      overlayUi.futureCacheRetry.disabled = futureCache.phase === "loading";
     }
     if (!futureCacheBadge) {
-      futureCacheBadge = document.createElement("div");
-      futureCacheBadge.setAttribute("aria-live", "polite");
-      futureCacheBadge.style.cssText = "position:fixed;top:calc(env(safe-area-inset-top) + 65px);right:8px;z-index:2147483640;max-width:210px;padding:6px 9px;border-radius:12px;background:rgba(23,32,51,.91);color:#fff;font:11px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;box-shadow:0 2px 8px #0002;pointer-events:none;";
+      futureCacheBadge = document.createElement("button");
+      futureCacheBadge.type = "button";
+      futureCacheBadge.setAttribute("aria-label", "打开单词辨音面板");
+      futureCacheBadge.style.cssText = "position:fixed;top:calc(env(safe-area-inset-top) + 65px);right:8px;z-index:2147483640;max-width:min(240px,70vw);padding:7px 10px;border:1px solid rgba(255,255,255,.15);border-radius:12px;background:rgba(23,32,51,.94);color:#fff;text-align:left;font:11px/1.55 -apple-system,BlinkMacSystemFont,sans-serif;box-shadow:0 2px 8px #0003;cursor:pointer;touch-action:manipulation;";
+      futureCacheBadge.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openResultPanel();
+      });
       document.documentElement.appendChild(futureCacheBadge);
     }
     futureCacheBadge.hidden = !isLearningMode();
-    futureCacheBadge.textContent = "🔊 " + label;
+    const badgeText = "📖 打开单词面板 · " + label;
+    if (futureCacheBadge.textContent !== badgeText) futureCacheBadge.textContent = badgeText;
     futureCacheBadge.title = detail;
   }
 
@@ -1429,7 +1468,7 @@
         </header>
         <div class="body normal-body">
           <div class="result-line"><span class="status"></span><span class="accent"></span></div>
-          <div class="future-cache-bar"><span>本轮听写音频备份</span><span class="future-cache-status">等待练习队列</span></div>
+          <div class="future-cache-bar"><span>本轮听写备用发音</span><span class="future-cache-status">等待练习队列</span><button class="future-cache-retry" type="button" hidden>重试失败项</button></div><div class="future-cache-detail" role="status">缓存的是词典备用发音，不是爱听写原录音。</div>
           <section class="target-card">
             <div class="target-top"><div><div class="word-line"><strong class="word"></strong><span class="book"></span></div><div class="ipa target-ipa"></div></div><button class="play-target audio-button" type="button" title="播放完整单词">🔊<kbd class="shortcut-key">·</kbd></button></div>
             <p class="meaning"></p><p class="attempt"></p>
@@ -1466,9 +1505,12 @@
       normalBody: shadow.querySelector(".normal-body"),
       candidates: shadow.querySelector(".candidates"),
       candidateCount: shadow.querySelector(".candidate-count"),
-      futureCacheStatus: shadow.querySelector(".future-cache-status")
+      futureCacheStatus: shadow.querySelector(".future-cache-status"),
+      futureCacheRetry: shadow.querySelector(".future-cache-retry"),
+      futureCacheDetail: shadow.querySelector(".future-cache-detail")
     };
     overlayUi.close.addEventListener("click", () => hideOverlay(true));
+    overlayUi.futureCacheRetry.addEventListener("click", retryFailedFutureAudio);
     installDragging(overlayUi.handle);
     installResizing(overlayUi.panel);
     chrome.storage.local.get({ overlayPosition: null, overlaySize: null, overlayMobileHeight: null }, applyOverlayGeometry);
@@ -1852,7 +1894,7 @@
       .drag-handle{height:52px;padding:0 12px 0 18px;background:linear-gradient(135deg,#ff6b61,#ff4d48);color:#fff;display:flex;align-items:center;justify-content:space-between;cursor:grab;touch-action:none;user-select:none}.drag-handle:active{cursor:grabbing}.drag-handle>div{display:flex;align-items:center;gap:10px}.drag-handle strong{font-size:16px}.previous{font-size:12px;padding:3px 8px;border-radius:99px;background:rgba(255,255,255,.22)}
       .close{width:32px;height:32px;border:0;border-radius:9px;background:rgba(255,255,255,.18);color:#fff;font-size:24px;line-height:1;cursor:pointer}.close:hover{background:rgba(255,255,255,.3)}
       .body{flex:1 1 auto;min-height:0;max-height:100%;overflow-x:hidden;overflow-y:auto;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;padding:14px 14px 48px;background:#f6f8fc}
-      .future-cache-bar{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;background:#edf4fa;color:#31516a;border:1px solid #d4e5f0;border-radius:9px;padding:8px;margin-bottom:9px;font-size:11px}.future-cache-status{font-weight:700}.scroll-end{text-align:center;color:#8390a3;font-size:11px;padding:18px 0 10px}.result-line{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}.status,.accent,.candidate-count,.book-badge,.book,.match-badge,.priority-badge{display:inline-flex;align-items:center;border-radius:99px;font-weight:700}.status{font-size:13px;padding:5px 10px}.status.correct{color:#087f5b;background:#dff7ed}.status.incorrect{color:#c92a2a;background:#ffe3e3}.status.protected{color:#5f3dc4;background:#eee9ff}.accent{font-size:12px;color:#57657b;background:#e9eef6;padding:4px 9px}
+      .future-cache-bar{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;background:#edf4fa;color:#31516a;border:1px solid #d4e5f0;border-radius:9px;padding:8px;margin-bottom:9px;font-size:11px}.future-cache-status{font-weight:700}.future-cache-retry{font-size:11px;cursor:pointer;background:#fff;border:1px solid #76abc8;color:#165475;border-radius:7px;padding:5px 9px;touch-action:manipulation}.future-cache-retry:disabled{opacity:.5}.future-cache-detail{font-size:10px;color:#63768b;margin:3px 0 10px;line-height:1.45;overflow-wrap:anywhere}.scroll-end{text-align:center;color:#8390a3;font-size:11px;padding:18px 0 10px}.result-line{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}.status,.accent,.candidate-count,.book-badge,.book,.match-badge,.priority-badge{display:inline-flex;align-items:center;border-radius:99px;font-weight:700}.status{font-size:13px;padding:5px 10px}.status.correct{color:#087f5b;background:#dff7ed}.status.incorrect{color:#c92a2a;background:#ffe3e3}.status.protected{color:#5f3dc4;background:#eee9ff}.accent{font-size:12px;color:#57657b;background:#e9eef6;padding:4px 9px}
       .target-card,.analysis,.plural,.deepseek,.learning,.candidate-card{background:#fff;border:1px solid #e7ebf2;border-radius:14px}.target-card{padding:14px}.target-top,.candidate-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.word-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.word{font-size:28px;line-height:1.15;color:#131b2d}.book{font-size:11px;padding:3px 7px;color:#52627a;background:#edf1f7}.meaning{margin:8px 0 0;font-size:14px;color:#33415c;line-height:1.55}.attempt{margin:8px 0 0;padding-top:8px;border-top:1px dashed #e6eaf0;font-size:12px;color:#68768d}
       .audio-button{min-width:42px;height:34px;flex:0 0 auto;padding:0 6px;border:1px solid #ffd1ce;border-radius:10px;background:#fff2f1;display:inline-flex;align-items:center;justify-content:center;gap:3px;cursor:pointer}.audio-button:hover{background:#ffe2df}.audio-button:disabled{opacity:.45;cursor:not-allowed}.shortcut-key{min-width:15px;height:16px;padding:0 3px;border:1px solid #e4aaa6;border-bottom-width:2px;border-radius:4px;background:#fff;color:#a43a35;font:700 10px/14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-align:center}.ipa{display:flex;align-items:baseline;flex-wrap:wrap;color:#172033;font-family:"Segoe UI",Arial,sans-serif;font-size:27px;line-height:1.3;margin-top:3px}.ipa-token{padding:0 1px;border:0;background:transparent;color:inherit;font:inherit;line-height:inherit;cursor:pointer;border-radius:4px}.ipa-token:hover{background:#fff0ef;color:#ff4f48}.ipa-token.different{color:#e03131;font-weight:900;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px}.ipa.large{font-size:22px;margin:0;flex:1}.target-ipa{font-size:28px}
       .analysis{margin-top:12px;padding:13px}.analysis-heading h3{font-size:15px;margin:0}.analysis-principle{margin:4px 0 0;color:#5f6e83;font-size:11px;line-height:1.5}.spelling-route{display:grid;gap:9px;margin-top:11px}.spelling-step{border:1px solid #e5eaf2;border-radius:11px;background:#fbfcfe;overflow:hidden}.spelling-step-heading{display:flex;align-items:center;gap:7px;padding:7px 9px;background:#f3f6fa;color:#35435a;font-size:11px}.step-number{display:inline-grid;place-items:center;width:19px;height:19px;border-radius:50%;background:#4058a9;color:#fff;font-size:10px;font-weight:900}.spelling-step-body{padding:9px}.route-pronunciation{display:flex;align-items:center;gap:8px}.sound-mapping-list{display:flex;align-items:stretch;gap:6px;flex-wrap:wrap;padding:1px}.sound-mapping{position:relative;display:grid;grid-template-columns:auto auto auto;grid-template-rows:auto auto;align-items:center;justify-content:center;gap:2px 5px;min-width:88px;padding:8px 7px 7px;border:1px solid #cfe8de;border-radius:9px;background:#f4fcf8}.sound-mapping.needs-work{border-color:#ffb8b2;background:#fff6f5}.sound-mapping.confidence-estimated,.sound-mapping.confidence-unmapped,.sound-mapping.confidence-unknown{border-style:dashed;border-color:#e6b15a;background:#fffaf0}.sound-mapping.confidence-silent{border-style:dashed;border-color:#cbd2dd;background:#f8f9fb}.mapping-sound-group{display:flex;min-width:38px;flex-direction:column;align-items:center;justify-content:center;gap:1px}.mapping-sound{padding:2px 4px;border:0;border-radius:5px;background:transparent;color:#3158a6;font-size:15px;font-weight:900;cursor:pointer}.mapping-sound:hover{background:#e7edff}.mapping-sound:disabled{color:#8792a3;cursor:default}.mapping-example{max-width:64px;overflow:hidden;color:#67758b;font-size:9px;font-weight:700;line-height:1.15;text-align:center;text-overflow:ellipsis;white-space:nowrap}.mapping-arrow{color:#8b95a5;font-size:12px}.mapping-correct .alignment-cell{font-size:17px}.mapping-typed{grid-column:1/-1;display:flex;align-items:center;justify-content:center;gap:4px;margin-top:3px;padding-top:4px;border-top:1px dashed rgba(201,42,42,.2)}.mapping-typed>small{color:#9b5050;font-size:8px}.mapping-confidence{grid-column:1/-1;justify-self:center;margin-top:2px;padding:2px 5px;border-radius:99px;background:#fff1cf;color:#936217;font-size:8px;font-weight:800}.mapping-caution{margin:5px 1px 0;color:#805d21;font-size:9px;line-height:1.45}.assembly-line{display:grid;grid-template-columns:54px 1fr;align-items:start;gap:7px}.assembly-line+.assembly-line{margin-top:7px;padding-top:7px;border-top:1px dashed #e1e6ee}.assembly-label{padding-top:3px;color:#728097;font-size:9px}.assembly-chunks{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.assembly-plus,.assembly-equals{color:#909aaa;font-size:11px}.assembly-chunk{min-width:18px;padding:2px 5px;border-radius:5px;background:#e6fcf5;color:#087f5b;font-size:14px;text-align:center}.assembly-chunk.expected{background:#fff3bf;color:#8a5c00}.assembly-chunk.error{background:#fff0f0;color:#c92a2a;text-decoration:line-through}.assembly-word{margin-left:2px;color:#172033;font-size:18px;letter-spacing:.4px}.assembly-line.typed .assembly-word{color:#c92a2a}.route-focus{margin:8px 0 0;padding:7px 8px;border-radius:7px;background:#edf2ff;color:#38508e;font-size:9px;line-height:1.45}.muted{font-size:12px;color:#7b879a}.muted.compact{margin:5px 0}.loading,.empty{padding:18px;text-align:center;color:#7b8799;font-size:13px;background:#fff;border:1px dashed #d9e0eb;border-radius:12px}

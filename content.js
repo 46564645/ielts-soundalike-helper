@@ -1244,7 +1244,9 @@
     } else if (payload.type === "native-error" || payload.type === "waiting") {
       studyNativeState = String(payload.reason || "原声未正常播放");
     } else if (payload.type === "bridge-ready") {
-      studyNativeState = "已连接原声监听";
+      studyNativeState = "已连接 HTML 音频监听";
+    } else if (payload.type === "native-unobserved") {
+      studyNativeState = String(payload.reason || "请先点击网站原播放键");
     }
     renderStudyAudioControls();
   }
@@ -1321,12 +1323,15 @@
         studyBackupAudio = null;
         renderStudyAudioControls();
       }, { once: true });
-      audio.play().catch(() => {
-        if (studyBackupAudio !== audio) return;
-        studyBackupAudio = null;
-        // A corrupt/blocked cached clip can still fall back to device speech.
-        speakStudyBackup();
-      });
+      const attempt = audio.play();
+      if (attempt && typeof attempt.catch === "function") {
+        attempt.catch(() => {
+          if (studyBackupAudio !== audio) return;
+          studyBackupAudio = null;
+          // A corrupt/blocked cached clip can still fall back to device speech.
+          speakStudyBackup();
+        });
+      }
     } catch {
       speakStudyBackup();
     }
@@ -1417,7 +1422,7 @@
     const backupLabel = !studyBackup.word ? "当前词尚未可靠识别" :
       studyBackup.kind === "cached" ? "缓存音频已准备" :
       studyBackup.kind === "tts" ? "设备语音备用" : "备用不可用";
-    const bridgeLabel = bridgeReady ? "" : " · 网站播放器监听未就绪";
+    const bridgeLabel = bridgeReady ? " · HTML音频监听" : " · 网站播放器监听未就绪";
     const label = backupLabel + bridgeLabel + " · " + studyNativeState;
     if (ui.status.textContent !== label) ui.status.textContent = label;
     ui.status.title = studyBackup.error || "自动模式在原声缓冲超过约2秒或播放出错时才接管；强制接管对后续题持续有效";

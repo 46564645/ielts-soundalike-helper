@@ -1178,9 +1178,9 @@
     const { ready, memory, done, total, failed } = futureCache;
     if (futureCache.phase === "loading") {
       return "准备 " + done + "/" + (futureCache.operationTotal || total) +
-        " · 已存 " + ready + " · 临时 " + memory + " · 失败 " + failed;
+        " · 已保存 " + ready + " · 临时未存 " + memory + " · 下载失败 " + failed;
     }
-    return "已存 " + ready + "/" + total + " · 临时 " + memory + " · 失败 " + failed;
+    return "已保存 " + ready + "/" + total + " · 临时未存 " + memory + " · 下载失败 " + failed;
   }
 
   function summarizeCacheReasons(records) {

@@ -87,7 +87,8 @@
       }
     }
     const words = [...new Set(bestWords)].slice(0, 50);
-    if (words.length < 3) return;
+    // Three exercises may contain only one or two distinct words during retry.
+    if (!words.length) return;
     const signature = words.join("|");
     if (signature === lastQueueSignature) return;
     lastQueueSignature = signature;

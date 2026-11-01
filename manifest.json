@@ -23,6 +23,11 @@
       "world": "MAIN"
     },
     {
+      "matches": ["https://www.idictation.cn/*"],
+      "js": ["safari-page-loader.js"],
+      "run_at": "document_start"
+    },
+    {
       "matches": [
         "https://ielts.itongzhuo.com/*",
         "https://www.idictation.cn/*"
@@ -33,7 +38,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["audio/phonemes/kk/*.mp3"],
+      "resources": ["page-capture.js", "audio/phonemes/kk/*.mp3"],
       "matches": ["https://ielts.itongzhuo.com/*", "https://www.idictation.cn/*"]
     }
   ],

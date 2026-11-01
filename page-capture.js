@@ -251,6 +251,12 @@
       }
     });
     document.addEventListener("ielts-native-audio-request-backup", () => {
+      // No observed site player means no safe way to stop a Web Audio source.
+      // Arm force mode, but do not play concurrently with unknown native audio.
+      if (!activeAudio) {
+        emit("native-unobserved", "尚未检测到网站音频，请先点击原播放按钮");
+        return;
+      }
       if (ready() && mode() !== "off") {
         lastBackupReplay = Date.now();
         activateFallback("手动点击接管");

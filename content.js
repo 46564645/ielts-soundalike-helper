@@ -552,6 +552,37 @@
       });
   }
 
+
+  function openResultPanel() {
+    if (!settings.enabled) return;
+    closedForSession = false;
+    const ui = ensureOverlay();
+    overlayHost.hidden = false;
+    if (lastResult) {
+      renderResult(lastResult);
+    } else {
+      // Never reveal a question's answer until it has been judged.
+      ui.previous.hidden = true;
+      ui.status.className = "status protected";
+      ui.status.textContent = "等待完成一题";
+      ui.accent.textContent = settings.accent === "uk" ? "英式发音" : "美式发音";
+      ui.word.textContent = "听写辨音助手";
+      ui.book.textContent = "尚无已判题记录";
+      ui.targetIpa.replaceChildren();
+      ui.playTarget.disabled = true;
+      ui.playTarget.onclick = null;
+      ui.meaning.textContent = "答完一道听写题后，这里会显示正确词、发音和辨音分析。";
+      ui.attempt.textContent = "关闭后，可以点击页面上的「打开单词面板」重新进入。";
+      for (const node of [ui.analysis, ui.plural, ui.deepseek, ui.learning]) {
+        node.hidden = true;
+        node.replaceChildren();
+      }
+      ui.candidateCount.textContent = "待判题";
+      ui.candidates.replaceChildren();
+    }
+    if (IS_IDICTATION) updateFutureCacheDisplay();
+  }
+
   function renderResult(result) {
     const ui = ensureOverlay();
     const packet = result.package;

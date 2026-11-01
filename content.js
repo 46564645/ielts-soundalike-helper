@@ -1129,7 +1129,9 @@
   }
 
   function isStudyNativeBridgeReady() {
-    return document.documentElement?.getAttribute("data-ielts-native-audio-bridge") === "html-media-v1";
+    const kind = document.documentElement?.getAttribute("data-ielts-native-audio-bridge") || "";
+    return kind === "html-media-v1" || kind === "html-media+speaker-v2" ||
+      kind === "speaker-only-v2";
   }
 
   function hasStudyBackup() {
@@ -1253,7 +1255,9 @@
                payload.type === "backup-timeout") {
       studyNativeState = String(payload.reason || "原声未正常播放");
     } else if (payload.type === "bridge-ready") {
-      studyNativeState = "已连接 HTML 音频监听";
+      studyNativeState = "已连接网站播放监听";
+    } else if (payload.type === "speaker-click") {
+      studyNativeState = String(payload.reason || "检测到网站喇叭点击");
     } else if (payload.type === "native-unobserved") {
       studyNativeState = String(payload.reason || "请先点击网站原播放键");
     }
@@ -1364,16 +1368,24 @@
     settings.audioTakeoverMode = mode;
     applyStudyAudioMode();
     chrome.storage.sync.set({ audioTakeoverMode: mode });
-    // A direct click remains a user gesture, enabling audio playback on iOS.
-    if (mode === "force" && hasStudyBackup() && isStudyNativeBridgeReady()) {
-      document.dispatchEvent(new Event("ielts-native-audio-request-backup"));
-    }
+    // Switching to forced mode is itself a user gesture: give immediate
+    // feedback, then intercept later site speaker clicks automatically.
+    if (mode === "force") requestStudyBackupReplay();
   }
 
   function requestStudyBackupReplay() {
-    if (!isStudyNativeBridgeReady() || !hasStudyBackup()) return;
-    if (normalizeStudyAudioMode(settings.audioTakeoverMode) === "off") return;
-    document.dispatchEvent(new Event("ielts-native-audio-request-backup"));
+    // This click is a direct user gesture: play cached audio without first
+    // requiring the website's native player to have been detected or started.
+    if (!hasStudyBackup()) {
+      studyNativeState = studyBackup.loading ? "备用音频正在准备，请稍后点播放" : "当前题尚无可播放的缓存";
+      renderStudyAudioControls();
+      return;
+    }
+    document.dispatchEvent(new Event("ielts-native-audio-manual-stop"));
+    studyNativeState = studyBackup.kind === "cached"
+      ? "用户点击，直接播放当前词缓存" : "用户点击，播放设备英语语音";
+    playCurrentStudyBackup();
+    renderStudyAudioControls();
   }
 
   function ensureStudyAudioControls() {
@@ -1403,7 +1415,7 @@
       }
       const replay = document.createElement("button");
       replay.type = "button";
-      replay.textContent = "▶ 当前词备用重播";
+      replay.textContent = "▶ 直接播放当前词缓存";
       replay.style.cssText = "width:100%;padding:6px 5px;border:1px solid #628d9d;border-radius:7px;background:#315b6f;color:#fff;font:inherit;cursor:pointer;touch-action:manipulation;";
       replay.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -1438,12 +1450,16 @@
       }
       button.disabled = name === "force" && !bridgeReady;
     }
-    const replayDisabled = !bridgeReady || !hasStudyBackup() || mode === "off";
+    const replayDisabled = !hasStudyBackup();
     if (ui.replay.disabled !== replayDisabled) ui.replay.disabled = replayDisabled;
     const backupLabel = !studyBackup.word ? "当前词尚未可靠识别" :
       studyBackup.kind === "cached" ? "缓存音频已准备" :
       studyBackup.kind === "tts" ? "设备语音备用" : "备用不可用";
-    const bridgeLabel = bridgeReady ? " · HTML音频监听" : " · 网站播放器监听未就绪";
+    const bridgeKind = document.documentElement?.getAttribute("data-ielts-native-audio-bridge") || "";
+    const bridgeLabel = bridgeKind === "html-media+speaker-v2"
+      ? " · 喇叭+音频监听" : bridgeKind === "speaker-only-v2"
+        ? " · 喇叭监听（非HTML播放器）" : bridgeReady
+          ? " · HTML音频监听" : " · 网站喇叭监听未就绪";
     const label = backupLabel + bridgeLabel + " · " + studyNativeState;
     if (ui.status.textContent !== label) ui.status.textContent = label;
     ui.status.title = studyBackup.error || "自动模式在原声缓冲超过约2秒或播放出错时才接管；强制接管对后续题持续有效";

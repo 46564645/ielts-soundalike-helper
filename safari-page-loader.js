@@ -9,8 +9,10 @@
     const root = document.documentElement || document.head;
     if (!root) return false;
     installed = true;
-    if (root.getAttribute("data-ielts-native-audio-bridge") ||
-        document.querySelector('script[data-ielts-safari-page-bridge="true"]')) return true;
+    // MAIN-world support may be ignored by some Orion builds. An attribute
+    // written by an isolated-world copy doesn't prove the real site is hooked.
+    // Always try the page-script fallback; its main-world guard avoids duplicates.
+    if (document.querySelector('script[data-ielts-safari-page-bridge="true"]')) return true;
     const script = document.createElement("script");
     script.src = chrome.runtime.getURL("page-capture.js");
     script.dataset.ieltsSafariPageBridge = "true";

@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 const file = fs.readFileSync("page-capture.js", "utf8");
-function harness() {
+function harness(withHtmlAudio = true) {
   const attrs = new Map();
   const domListeners = new Map();
   const emitted = [];
@@ -61,7 +61,7 @@ function harness() {
   FakeXHR.prototype.open = function () {};
   FakeXHR.prototype.send = function () {};
   const context = {
-    HTMLMediaElement: FakeMedia,
+    HTMLMediaElement: withHtmlAudio ? FakeMedia : undefined,
     XMLHttpRequest: FakeXHR,
     document,
     Event: class { constructor(type) { this.type = type; } },
@@ -227,6 +227,30 @@ function harness() {
   const original = new h.FakeMedia();
   await original.play();
   assert.equal(original.playCount, 1, "off mode must not intercept site audio");
+
+  // iPhone site variants can use WebAudio only: speaker interception must
+  // remain available even with no HTMLMediaElement API to monkey-patch.
+  const w = harness(false);
+  assert.equal(w.root.getAttribute("data-ielts-native-audio-bridge"), "speaker-only-v2");
+  w.root.setAttribute("data-ielts-audio-takeover-mode", "force");
+  w.root.setAttribute("data-ielts-current-backup-ready", "yes");
+  let blockedWebAudioSpeaker = false;
+  const webAudioIcon = { getAttribute: () => "lucide lucide-volume-2" };
+  const webAudioControl = {
+    closest(selector) { return selector === "main" ? {} : null; },
+    getAttribute() { return ""; },
+    querySelector() { return webAudioIcon; }
+  };
+  w.document.dispatchEvent({
+    type: "click",
+    target: { closest(selector) { return selector.includes("button") ? webAudioControl : null; } },
+    cancelable: true,
+    preventDefault() { blockedWebAudioSpeaker = true; },
+    stopImmediatePropagation() {},
+    stopPropagation() {}
+  });
+  assert.equal(blockedWebAudioSpeaker, true);
+  assert.equal(w.emitted.at(-1).type, "takeover");
 
   console.log("Native HTML-audio fallback tests passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

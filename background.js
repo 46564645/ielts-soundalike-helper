@@ -679,7 +679,7 @@ async function loadAudio(item, accent) {
   // local-storage copy so retrying a word still works after worker suspension.
   try {
     const locallyCached = (await storageGet({ [AUDIO_LOCAL_PREFIX + key]: "" }))[AUDIO_LOCAL_PREFIX + key];
-    if (typeof locallyCached === "string" && locallyCached.startsWith("data:audio/")) {
+    if (typeof locallyCached === "string" && /^data:(?:audio\/|application\/octet-stream|binary\/octet-stream)/i.test(locallyCached)) {
       rememberAudio(key, locallyCached, true);
       return locallyCached;
     }

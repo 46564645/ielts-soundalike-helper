@@ -47,7 +47,7 @@ assert.equal(resolve("zzzzz", "无关词").found, false);
 assert.match(content, /if \(response\.audioMatchSafe === true\) prepareStudyBackup/);
 assert.match(content, /const isCached = \/\^data:/,
   "a remote URL must not be described as a successful local audio cache");
-assert.match(content, /studyBackup\.word \+ "\\|" \+ settings\.accent/,
+assert.match(content, /const key = P\.normalizeWord\(word\) \+ "\|" \+ settings\.accent/,
   "cache must be keyed by word and accent");
 assert.match(content, /chooseStudyAudioMode\(value\)/);
 assert.match(content, /ielts-native-audio-request-backup/);

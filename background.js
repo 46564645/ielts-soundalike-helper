@@ -10,6 +10,13 @@ const BY_WORD = new Map(VOCABULARY.map((item) => [P.normalizeWord(item.word), it
 const ipaCache = new Map();
 const audioCache = new Map();
 const audioPersistence = new Map();
+const audioInFlight = new Map();
+const AUDIO_LOCAL_PREFIX = "wordAudioV2:";
+const AUDIO_LOCAL_INDEX = "wordAudioIndexV2";
+const AUDIO_LOCAL_MAX_ITEMS = 60;
+const AUDIO_LOCAL_MAX_CHARS = 3500000;
+const AUDIO_LOCAL_MAX_ITEM_CHARS = 100000;
+let localAudioWriteChain = Promise.resolve();
 const MAX_AUDIO_CACHE = 120;
 const SOUND_FAVORITES_KEY = "soundSpellingFavoritesV1";
 const DEEPSEEK_CACHE_KEY = "deepseekWordCacheV1";
@@ -656,7 +663,29 @@ async function fetchExactIpa(word) {
 async function fetchAudio(item, accent) {
   const key = `${accent}:${P.normalizeWord(item.word)}`;
   if (!P.normalizeWord(item.word)) return "";
+  // The same word can occur repeatedly in incorrect-answer review sessions.
+  // A simultaneous retry must reuse one download instead of opening another.
+  if (audioInFlight.has(key)) return audioInFlight.get(key);
+  const request = loadAudio(item, accent).finally(() => audioInFlight.delete(key));
+  audioInFlight.set(key, request);
+  return request;
+}
+
+async function loadAudio(item, accent) {
+  const key = `${accent}:${P.normalizeWord(item.word)}`;
+  if (!P.normalizeWord(item.word)) return "";
   if (audioCache.has(key)) return audioCache.get(key);
+  // On iOS Safari/Orion, the CacheStorage API may be absent. Keep a bounded
+  // local-storage copy so retrying a word still works after worker suspension.
+  try {
+    const locallyCached = (await storageGet({ [AUDIO_LOCAL_PREFIX + key]: "" }))[AUDIO_LOCAL_PREFIX + key];
+    if (typeof locallyCached === "string" && locallyCached.startsWith("data:audio/")) {
+      rememberAudio(key, locallyCached, true);
+      return locallyCached;
+    }
+  } catch {
+    // Fall back to CacheStorage and network; never break the study page.
+  }
   const remoteUrl = fallbackAudioUrl(item, accent);
   // CacheStorage survives MV3 service-worker suspension, unlike the in-memory Map.
   // Do not serve a failed/empty network response as cached audio.
@@ -695,6 +724,12 @@ async function fetchAudio(item, accent) {
     }
   }
   const dataUrl = await blobToDataUrl(blob);
+  if (!persisted) persisted = await storeAudioLocally(key, dataUrl);
+  rememberAudio(key, dataUrl, persisted);
+  return dataUrl;
+}
+
+function rememberAudio(key, dataUrl, persisted) {
   audioCache.set(key, dataUrl);
   audioPersistence.set(key, persisted);
   while (audioCache.size > MAX_AUDIO_CACHE) {
@@ -702,7 +737,42 @@ async function fetchAudio(item, accent) {
     audioCache.delete(stale);
     audioPersistence.delete(stale);
   }
-  return dataUrl;
+}
+
+function storeAudioLocally(key, dataUrl) {
+  if (typeof dataUrl !== "string" || dataUrl.length > AUDIO_LOCAL_MAX_ITEM_CHARS) {
+    return Promise.resolve(false);
+  }
+  const task = localAudioWriteChain.catch(() => {}).then(async () => {
+    const index = (await storageGet({ [AUDIO_LOCAL_INDEX]: [] }))[AUDIO_LOCAL_INDEX];
+    const entries = Array.isArray(index) ? index.filter((e) => e && typeof e.key === "string" && Number.isFinite(e.size)) : [];
+    const filtered = entries.filter((entry) => entry.key !== key);
+    filtered.push({ key, size: dataUrl.length });
+    let total = filtered.reduce((sum, entry) => sum + entry.size, 0);
+    const evicted = [];
+    while (filtered.length > AUDIO_LOCAL_MAX_ITEMS || total > AUDIO_LOCAL_MAX_CHARS) {
+      const oldest = filtered.shift();
+      total -= oldest.size;
+      evicted.push(AUDIO_LOCAL_PREFIX + oldest.key);
+    }
+    await storageSet({
+      [AUDIO_LOCAL_PREFIX + key]: dataUrl,
+      [AUDIO_LOCAL_INDEX]: filtered
+    });
+    if (evicted.length) await storageRemove(evicted);
+    return true;
+  });
+  localAudioWriteChain = task.catch(() => {});
+  return task.catch(() => false);
+}
+
+function storageRemove(keys) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.remove(keys, () => {
+      if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+      else resolve();
+    });
+  });
 }
 
 function fallbackAudioUrl(item, accent) {

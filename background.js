@@ -135,12 +135,18 @@ async function prefetchAudioWords(rawWords, rawAccent) {
     }
   }
   await Promise.all(Array.from({ length: Math.min(3, unique.length) }, worker));
+  const failureTypes = {};
+  for (const reason of Object.values(failureReasons)) {
+    const label = formatAudioFailure(reason);
+    failureTypes[label] = (failureTypes[label] || 0) + 1;
+  }
   return {
     count: Object.values(statuses).filter((status) => status === "ready").length,
     memoryCount: Object.values(statuses).filter((status) => status === "memory").length,
     statuses,
     total: unique.length,
-    error: Object.values(failureReasons)[0] || ""
+    failures: failureTypes,
+    error: Object.keys(failureTypes).map((reason) => `${reason}（${failureTypes[reason]}）`).join("；")
   };
 }
 
@@ -686,7 +692,7 @@ async function loadAudio(item, accent) {
   } catch {
     // Fall back to CacheStorage and network; never break the study page.
   }
-  const remoteUrl = fallbackAudioUrl(item, accent);
+  let remoteUrl = fallbackAudioUrl(item, accent);
   // CacheStorage survives MV3 service-worker suspension, unlike the in-memory Map.
   // Do not serve a failed/empty network response as cached audio.
   let blob = null;
@@ -703,10 +709,26 @@ async function loadAudio(item, accent) {
     // CacheStorage may be unavailable in some iOS extension runtimes.
   }
   if (!blob?.size) {
-    const response = await fetch(remoteUrl, { cache: "force-cache", signal: AbortSignal.timeout(6500) });
-    if (!response.ok) throw new Error(`音频服务返回 ${response.status}`);
+    let response;
+    try {
+      response = await fetchAudioWithTimeout(remoteUrl);
+      if (!response.ok) throw new Error(`音频服务返回 ${response.status}`);
+    } catch (originalError) {
+      // A listed UK audio file may have disappeared: retry the public
+      // dictionary pronunciation URL, without changing the website's audio.
+      if (!(accent === "uk" && item?.ukSpeech)) throw originalError;
+      const backupUrl = dictionaryAudioUrl(item.word, accent);
+      try {
+        response = await fetchAudioWithTimeout(backupUrl);
+        if (!response.ok) throw new Error(`备用发音返回 ${response.status}`);
+        remoteUrl = backupUrl;
+      } catch (backupError) {
+        throw new Error(`${readableError(originalError)}；备用：${readableError(backupError)}`);
+      }
+    }
     blob = await response.blob();
-    if (!blob.size) throw new Error("音频为空");
+    if (!blob.size) throw new Error("音频内容为空");
+    if (blob.size > 2 * 1024 * 1024) throw new Error("音频文件过大");
     if (store) {
       try {
         await store.put(remoteUrl, new Response(blob, {
@@ -775,21 +797,61 @@ function storageRemove(keys) {
   });
 }
 
+async function fetchAudioWithTimeout(url, timeoutMs = 9000) {
+  // AbortSignal.timeout isn't supported by every Orion/WKWebView runtime.
+  // AbortController works in iOS extension workers and permits a real deadline.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { cache: "force-cache", signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("音频请求超时");
+    throw new Error(`音频网络请求失败：${readableError(error)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function formatAudioFailure(message) {
+  const text = String(message || "未知错误");
+  if (/超时|abort|timed? ?out/i.test(text)) return "请求超时";
+  if (/403|401/.test(text)) return "音频源拒绝访问";
+  if (/404/.test(text)) return "音频源不存在";
+  if (/429/.test(text)) return "音频源请求过多";
+  if (/网络|fetch|connection|network|cors|load failed/i.test(text)) return "网络或扩展权限限制";
+  if (/为空|过大|blob|data/i.test(text)) return "音频内容异常";
+  return text.slice(0, 70);
+}
+
+function dictionaryAudioUrl(word, accent) {
+  const type = accent === "uk" ? 1 : 2;
+  return `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(word || "")}&type=${type}`;
+}
+
 function fallbackAudioUrl(item, accent) {
   if (accent === "uk" && item?.ukSpeech) {
     return `https://ai-oss3.oss-cn-shenzhen.aliyuncs.com/ielts_word/${encodeURIComponent(item.ukSpeech)}`;
   }
-  const type = accent === "uk" ? 1 : 2;
-  return `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(item?.word || "")}&type=${type}`;
+  return dictionaryAudioUrl(item?.word, accent);
 }
 
-function blobToDataUrl(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(reader.error || new Error("读取音频失败"));
-    reader.readAsDataURL(blob);
-  });
+async function blobToDataUrl(blob) {
+  // FileReader is not available in Chrome MV3 service workers (also varies in
+  // Orion). ArrayBuffer is worker-safe and doesn't rely on browser globals.
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const pieces = [];
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i], b = bytes[i + 1], c = bytes[i + 2];
+    pieces.push(
+      digits[a >> 2] +
+      digits[((a & 3) << 4) | ((b || 0) >> 4)] +
+      (i + 1 < bytes.length ? digits[((b & 15) << 2) | ((c || 0) >> 6)] : "=") +
+      (i + 2 < bytes.length ? digits[c & 63] : "=")
+    );
+  }
+  const contentType = String(blob.type || "audio/mpeg").replace(/[^a-z0-9/+.-]/gi, "") || "audio/mpeg";
+  return `data:${contentType};base64,${pieces.join("")}`;
 }
 
 async function toggleSoundSpellingFavorite(rawFavorite) {

@@ -60,7 +60,8 @@
     if (changes.enabled) {
       settings.enabled = changes.enabled.newValue !== false;
       if (!settings.enabled) hideOverlay(false);
-      else queuePrefetch();
+      applyStudyAudioMode();
+      if (settings.enabled) queuePrefetch();
     }
     if (changes.accent) {
       settings.accent = changes.accent.newValue === "uk" ? "uk" : "us";
@@ -1145,7 +1146,7 @@
 
   function applyStudyAudioMode() {
     if (!IS_IDICTATION) return;
-    const mode = normalizeStudyAudioMode(settings.audioTakeoverMode);
+    const mode = settings.enabled ? normalizeStudyAudioMode(settings.audioTakeoverMode) : "off";
     document.documentElement?.setAttribute("data-ielts-audio-takeover-mode", mode);
     syncStudyBackupReady();
     document.dispatchEvent(new Event("ielts-native-audio-mode-change"));

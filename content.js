@@ -1168,6 +1168,7 @@
   function startNewStudyQuestion(signature) {
     if (!signature || signature === studyQuestionSignature) return;
     studyQuestionSignature = signature;
+    idictationClueKey = "";
     stopStudyBackupPlayback();
     studyBackup = { word: "", key: "", url: "", kind: "none",
       loading: false, run: studyBackup.run + 1, error: "" };
@@ -1762,6 +1763,7 @@
     const playNext = () => {
       if (runId !== activeAudioRun || index >= queue.length) return;
       const audio = new Audio(queue[index++]);
+      audio.setAttribute("data-ielts-helper-backup", "true");
       activeAudio = audio;
       let advanced = false;
       let clipTimer = 0;
@@ -1797,6 +1799,7 @@
       return;
     }
     activeAudio = new Audio(url);
+    activeAudio.setAttribute("data-ielts-helper-backup", "true");
     activeAudio.play().catch(() => {
       if (word && !String(word).startsWith("/")) {
         const utterance = new SpeechSynthesisUtterance(word);

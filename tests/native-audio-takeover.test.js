@@ -100,7 +100,7 @@ function harness() {
 
 (async () => {
   const h = harness();
-  assert.equal(h.root.getAttribute("data-ielts-native-audio-bridge"), "html-media-v1");
+  assert.equal(h.root.getAttribute("data-ielts-native-audio-bridge"), "html-media+speaker-v2");
   h.root.setAttribute("data-ielts-audio-takeover-mode", "auto");
   h.root.setAttribute("data-ielts-current-backup-ready", "yes");
 
@@ -176,6 +176,51 @@ function harness() {
   h.root.setAttribute("data-ielts-fallback-started", String(ticket));
   h.tick(3100);
   assert.equal(speaking.playCount, 1, "confirmed backup playback must keep native audio paused");
+
+
+  // The website may have a speaker icon while audio is powered by Web Audio.
+  // In force mode, intercept the icon click before React handles it.
+  h.document.dispatchEvent({ type: "ielts-native-audio-reset" });
+  h.root.setAttribute("data-ielts-audio-takeover-mode", "force");
+  h.root.setAttribute("data-ielts-current-backup-ready", "yes");
+  const speakerControl = {
+    closest(selector) { return selector === "main" ? {} : null; },
+    getAttribute(name) { return name === "aria-label" ? "播放发音" : ""; },
+    querySelector() { return null; }
+  };
+  const speakerTarget = {
+    closest(selector) {
+      if (selector.includes("button")) return speakerControl;
+      return null;
+    }
+  };
+  let blockedSpeaker = false;
+  h.document.dispatchEvent({
+    type: "click", target: speakerTarget, cancelable: true,
+    preventDefault() { blockedSpeaker = true; },
+    stopImmediatePropagation() {},
+    stopPropagation() {}
+  });
+  assert.equal(blockedSpeaker, true, "force mode intercepts the website speaker click");
+  assert.equal(h.emitted.at(-1).type, "takeover");
+
+  // An answer button must not be intercepted even when force mode is on.
+  let blockedAnswer = false;
+  const answerControl = {
+    closest(selector) { return selector === "main" ? {} : null; },
+    getAttribute(name) { return name === "aria-label" ? "提交答案" : ""; },
+    querySelector() { return null; }
+  };
+  h.document.dispatchEvent({
+    type: "click",
+    target: { closest(selector) { return selector.includes("button") ? answerControl : null; } },
+    cancelable: true,
+    preventDefault() { blockedAnswer = true; },
+    stopImmediatePropagation() {},
+    stopPropagation() {}
+  });
+  assert.equal(blockedAnswer, false, "answer controls are never intercepted");
+  h.document.dispatchEvent({ type: "ielts-native-audio-reset" });
 
   h.root.setAttribute("data-ielts-audio-takeover-mode", "off");
   h.document.dispatchEvent({ type: "ielts-native-audio-mode-change" });

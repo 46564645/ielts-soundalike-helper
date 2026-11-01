@@ -51,6 +51,16 @@ function createHarness(payload) {
   assert.deepEqual(Array.from(queue.words), ["apple", "banana", "cat", "dog"]);
   assert.equal(h.dispatched.filter((e) => e === "ielts-future-audio-queue-ready").length, 1);
 
+  // An incorrect answer can return several times in the same session.
+  const retries = createHarness({ data: [{ word: "again" }, { word: "again" }, { word: "again" }] });
+  await retries.context.window.fetch("/api/study/word/list");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    Array.from(JSON.parse(retries.attrs.get("data-ielts-future-audio-queue")).words),
+    ["again"],
+    "repeated review words should be captured once for preloading"
+  );
+
   const single = createHarness({ data: [{ word: "apple" }] });
   await single.context.window.fetch("/api/study/word/list");
   await new Promise((resolve) => setImmediate(resolve));

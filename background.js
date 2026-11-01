@@ -296,7 +296,11 @@ function resolveWordFromClue(rawIpa, rawMeaning) {
     word: best.item.word,
     ipa: best.item.ukIpa,
     meaning: best.item.meaning,
-    confidence: best.score >= 1 ? "ipa+meaning" : "ipa"
+    confidence: best.score >= 1 ? "ipa+meaning" : "ipa",
+    // Do not take over an unanswered question with a guessed homophone.
+    // Exact/subset meaning and a clear margin over the runner-up are required.
+    audioMatchSafe: best.score >= 6 &&
+      (!matches[1] || best.score - matches[1].score >= 2)
   };
 }
 

@@ -52,7 +52,7 @@
     if (location.hostname !== "www.idictation.cn" || location.pathname !== "/home") return false;
     try {
       const parsed = new URL(url, location.href);
-      return parsed.origin === location.origin && /\\/api\\//i.test(parsed.pathname)
+      return parsed.origin === location.origin && /\/api\//i.test(parsed.pathname)
         && /(?:study|dictation|word|review|learn|train|practice|exercise|session|task|list)/i.test(parsed.pathname);
     } catch {
       return false;

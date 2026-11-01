@@ -1432,6 +1432,24 @@
   }
 
   function renderStudyAudioControls() {
+    // Render the playback button inside the main analysis/cache panel even
+    // when the separate floating controller is not yet mounted.
+    const backupReady = hasStudyBackup();
+    const backupKind = studyBackup.kind;
+    const directLabel = backupKind === "cached"
+      ? "▶ 播放已缓存当前词" : backupKind === "tts"
+        ? "▶ 播放设备英语发音" : "▶ 当前词备用播放";
+    const directHint = !studyBackup.word ? "当前词尚未识别" :
+      backupKind === "cached" ? "音频已下载，可直接试听" :
+      backupKind === "tts" ? "词典缓存未就绪，可使用设备发音" :
+      studyBackup.loading ? "正在准备音频" : "没有备用音频";
+    if (overlayUi?.currentBackupPlay) {
+      overlayUi.currentBackupPlay.disabled = !backupReady;
+      if (overlayUi.currentBackupPlay.textContent !== directLabel)
+        overlayUi.currentBackupPlay.textContent = directLabel;
+      if (overlayUi.currentBackupHint.textContent !== directHint)
+        overlayUi.currentBackupHint.textContent = directHint;
+    }
     const ui = studyTakeoverUi;
     if (!ui) return;
     const visible = settings.enabled && isLearningMode() && location.pathname === "/home";
@@ -1450,8 +1468,11 @@
       }
       button.disabled = name === "force" && !bridgeReady;
     }
-    const replayDisabled = !hasStudyBackup();
+    const replayDisabled = !backupReady;
     if (ui.replay.disabled !== replayDisabled) ui.replay.disabled = replayDisabled;
+    const replayText = backupKind === "cached" ? "▶ 直接播放当前词缓存" :
+      backupKind === "tts" ? "▶ 播放设备英语发音" : "▶ 当前词备用播放";
+    if (ui.replay.textContent !== replayText) ui.replay.textContent = replayText;
     const backupLabel = !studyBackup.word ? "当前词尚未可靠识别" :
       studyBackup.kind === "cached" ? "缓存音频已准备" :
       studyBackup.kind === "tts" ? "设备语音备用" : "备用不可用";
@@ -1874,6 +1895,7 @@
         <div class="body normal-body">
           <div class="result-line"><span class="status"></span><span class="accent"></span></div>
           <div class="future-cache-bar"><span>本轮听写备用发音</span><span class="future-cache-status">等待练习队列</span><button class="future-cache-retry" type="button" hidden>重试未存项</button></div><div class="future-cache-detail" role="status">缓存的是词典备用发音，不是爱听写原录音。</div>
+          <div class="current-backup-actions"><button class="current-backup-play" type="button" disabled>▶ 当前词缓存播放</button><span class="current-backup-hint" aria-live="polite">等待当前词备用发音</span></div>
           <section class="target-card">
             <div class="target-top"><div><div class="word-line"><strong class="word"></strong><span class="book"></span></div><div class="ipa target-ipa"></div></div><button class="play-target audio-button" type="button" title="播放完整单词">🔊<kbd class="shortcut-key">·</kbd></button></div>
             <p class="meaning"></p><p class="attempt"></p>
@@ -1912,14 +1934,23 @@
       candidateCount: shadow.querySelector(".candidate-count"),
       futureCacheStatus: shadow.querySelector(".future-cache-status"),
       futureCacheRetry: shadow.querySelector(".future-cache-retry"),
-      futureCacheDetail: shadow.querySelector(".future-cache-detail")
+      futureCacheDetail: shadow.querySelector(".future-cache-detail"),
+      currentBackupPlay: shadow.querySelector(".current-backup-play"),
+      currentBackupHint: shadow.querySelector(".current-backup-hint")
     };
     overlayUi.close.addEventListener("click", () => hideOverlay(true));
     overlayUi.futureCacheRetry.addEventListener("click", retryFailedFutureAudio);
+    overlayUi.currentBackupPlay.addEventListener("click", (event) => {
+      event.stopPropagation();
+      requestStudyBackupReplay();
+    });
     installDragging(overlayUi.handle);
     installResizing(overlayUi.panel);
     chrome.storage.local.get({ overlayPosition: null, overlaySize: null, overlayMobileHeight: null }, applyOverlayGeometry);
-    if (IS_IDICTATION) overlayUi.futureCacheStatus.textContent = futureCacheLabel();
+    if (IS_IDICTATION) {
+      overlayUi.futureCacheStatus.textContent = futureCacheLabel();
+      renderStudyAudioControls();
+    }
     return overlayUi;
   }
 
@@ -2313,7 +2344,7 @@
       .drag-handle{height:52px;padding:0 12px 0 18px;background:linear-gradient(135deg,#ff6b61,#ff4d48);color:#fff;display:flex;align-items:center;justify-content:space-between;cursor:grab;touch-action:none;user-select:none}.drag-handle:active{cursor:grabbing}.drag-handle>div{display:flex;align-items:center;gap:10px}.drag-handle strong{font-size:16px}.previous{font-size:12px;padding:3px 8px;border-radius:99px;background:rgba(255,255,255,.22)}
       .close{width:32px;height:32px;border:0;border-radius:9px;background:rgba(255,255,255,.18);color:#fff;font-size:24px;line-height:1;cursor:pointer}.close:hover{background:rgba(255,255,255,.3)}
       .body{flex:1 1 auto;min-height:0;max-height:100%;overflow-x:hidden;overflow-y:auto;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;padding:14px 14px 48px;background:#f6f8fc}
-      .future-cache-bar{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;background:#edf4fa;color:#31516a;border:1px solid #d4e5f0;border-radius:9px;padding:8px;margin-bottom:9px;font-size:11px}.future-cache-status{font-weight:700}.future-cache-retry{font-size:11px;cursor:pointer;background:#fff;border:1px solid #76abc8;color:#165475;border-radius:7px;padding:5px 9px;touch-action:manipulation}.future-cache-retry:disabled{opacity:.5}.future-cache-detail{font-size:10px;color:#63768b;margin:3px 0 10px;line-height:1.45;overflow-wrap:anywhere}.scroll-end{text-align:center;color:#8390a3;font-size:11px;padding:18px 0 10px}.result-line{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}.status,.accent,.candidate-count,.book-badge,.book,.match-badge,.priority-badge{display:inline-flex;align-items:center;border-radius:99px;font-weight:700}.status{font-size:13px;padding:5px 10px}.status.correct{color:#087f5b;background:#dff7ed}.status.incorrect{color:#c92a2a;background:#ffe3e3}.status.protected{color:#5f3dc4;background:#eee9ff}.accent{font-size:12px;color:#57657b;background:#e9eef6;padding:4px 9px}
+      .future-cache-bar{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;background:#edf4fa;color:#31516a;border:1px solid #d4e5f0;border-radius:9px;padding:8px;margin-bottom:9px;font-size:11px}.future-cache-status{font-weight:700}.future-cache-retry{font-size:11px;cursor:pointer;background:#fff;border:1px solid #76abc8;color:#165475;border-radius:7px;padding:5px 9px;touch-action:manipulation}.future-cache-retry:disabled{opacity:.5}.current-backup-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:4px 0 11px}.current-backup-play{background:#166977;color:#fff;border:0;border-radius:9px;padding:8px 12px;font-size:12px;font-weight:700;min-height:36px;touch-action:manipulation;cursor:pointer}.current-backup-play:disabled{opacity:.48;cursor:default}.current-backup-hint{font-size:11px;color:#53647b}.future-cache-detail{font-size:10px;color:#63768b;margin:3px 0 10px;line-height:1.45;overflow-wrap:anywhere}.scroll-end{text-align:center;color:#8390a3;font-size:11px;padding:18px 0 10px}.result-line{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}.status,.accent,.candidate-count,.book-badge,.book,.match-badge,.priority-badge{display:inline-flex;align-items:center;border-radius:99px;font-weight:700}.status{font-size:13px;padding:5px 10px}.status.correct{color:#087f5b;background:#dff7ed}.status.incorrect{color:#c92a2a;background:#ffe3e3}.status.protected{color:#5f3dc4;background:#eee9ff}.accent{font-size:12px;color:#57657b;background:#e9eef6;padding:4px 9px}
       .target-card,.analysis,.plural,.deepseek,.learning,.candidate-card{background:#fff;border:1px solid #e7ebf2;border-radius:14px}.target-card{padding:14px}.target-top,.candidate-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.word-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.word{font-size:28px;line-height:1.15;color:#131b2d}.book{font-size:11px;padding:3px 7px;color:#52627a;background:#edf1f7}.meaning{margin:8px 0 0;font-size:14px;color:#33415c;line-height:1.55}.attempt{margin:8px 0 0;padding-top:8px;border-top:1px dashed #e6eaf0;font-size:12px;color:#68768d}
       .audio-button{min-width:42px;height:34px;flex:0 0 auto;padding:0 6px;border:1px solid #ffd1ce;border-radius:10px;background:#fff2f1;display:inline-flex;align-items:center;justify-content:center;gap:3px;cursor:pointer}.audio-button:hover{background:#ffe2df}.audio-button:disabled{opacity:.45;cursor:not-allowed}.shortcut-key{min-width:15px;height:16px;padding:0 3px;border:1px solid #e4aaa6;border-bottom-width:2px;border-radius:4px;background:#fff;color:#a43a35;font:700 10px/14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-align:center}.ipa{display:flex;align-items:baseline;flex-wrap:wrap;color:#172033;font-family:"Segoe UI",Arial,sans-serif;font-size:27px;line-height:1.3;margin-top:3px}.ipa-token{padding:0 1px;border:0;background:transparent;color:inherit;font:inherit;line-height:inherit;cursor:pointer;border-radius:4px}.ipa-token:hover{background:#fff0ef;color:#ff4f48}.ipa-token.different{color:#e03131;font-weight:900;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px}.ipa.large{font-size:22px;margin:0;flex:1}.target-ipa{font-size:28px}
       .analysis{margin-top:12px;padding:13px}.analysis-heading h3{font-size:15px;margin:0}.analysis-principle{margin:4px 0 0;color:#5f6e83;font-size:11px;line-height:1.5}.spelling-route{display:grid;gap:9px;margin-top:11px}.spelling-step{border:1px solid #e5eaf2;border-radius:11px;background:#fbfcfe;overflow:hidden}.spelling-step-heading{display:flex;align-items:center;gap:7px;padding:7px 9px;background:#f3f6fa;color:#35435a;font-size:11px}.step-number{display:inline-grid;place-items:center;width:19px;height:19px;border-radius:50%;background:#4058a9;color:#fff;font-size:10px;font-weight:900}.spelling-step-body{padding:9px}.route-pronunciation{display:flex;align-items:center;gap:8px}.sound-mapping-list{display:flex;align-items:stretch;gap:6px;flex-wrap:wrap;padding:1px}.sound-mapping{position:relative;display:grid;grid-template-columns:auto auto auto;grid-template-rows:auto auto;align-items:center;justify-content:center;gap:2px 5px;min-width:88px;padding:8px 7px 7px;border:1px solid #cfe8de;border-radius:9px;background:#f4fcf8}.sound-mapping.needs-work{border-color:#ffb8b2;background:#fff6f5}.sound-mapping.confidence-estimated,.sound-mapping.confidence-unmapped,.sound-mapping.confidence-unknown{border-style:dashed;border-color:#e6b15a;background:#fffaf0}.sound-mapping.confidence-silent{border-style:dashed;border-color:#cbd2dd;background:#f8f9fb}.mapping-sound-group{display:flex;min-width:38px;flex-direction:column;align-items:center;justify-content:center;gap:1px}.mapping-sound{padding:2px 4px;border:0;border-radius:5px;background:transparent;color:#3158a6;font-size:15px;font-weight:900;cursor:pointer}.mapping-sound:hover{background:#e7edff}.mapping-sound:disabled{color:#8792a3;cursor:default}.mapping-example{max-width:64px;overflow:hidden;color:#67758b;font-size:9px;font-weight:700;line-height:1.15;text-align:center;text-overflow:ellipsis;white-space:nowrap}.mapping-arrow{color:#8b95a5;font-size:12px}.mapping-correct .alignment-cell{font-size:17px}.mapping-typed{grid-column:1/-1;display:flex;align-items:center;justify-content:center;gap:4px;margin-top:3px;padding-top:4px;border-top:1px dashed rgba(201,42,42,.2)}.mapping-typed>small{color:#9b5050;font-size:8px}.mapping-confidence{grid-column:1/-1;justify-self:center;margin-top:2px;padding:2px 5px;border-radius:99px;background:#fff1cf;color:#936217;font-size:8px;font-weight:800}.mapping-caution{margin:5px 1px 0;color:#805d21;font-size:9px;line-height:1.45}.assembly-line{display:grid;grid-template-columns:54px 1fr;align-items:start;gap:7px}.assembly-line+.assembly-line{margin-top:7px;padding-top:7px;border-top:1px dashed #e1e6ee}.assembly-label{padding-top:3px;color:#728097;font-size:9px}.assembly-chunks{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.assembly-plus,.assembly-equals{color:#909aaa;font-size:11px}.assembly-chunk{min-width:18px;padding:2px 5px;border-radius:5px;background:#e6fcf5;color:#087f5b;font-size:14px;text-align:center}.assembly-chunk.expected{background:#fff3bf;color:#8a5c00}.assembly-chunk.error{background:#fff0f0;color:#c92a2a;text-decoration:line-through}.assembly-word{margin-left:2px;color:#172033;font-size:18px;letter-spacing:.4px}.assembly-line.typed .assembly-word{color:#c92a2a}.route-focus{margin:8px 0 0;padding:7px 8px;border-radius:7px;background:#edf2ff;color:#38508e;font-size:9px;line-height:1.45}.muted{font-size:12px;color:#7b879a}.muted.compact{margin:5px 0}.loading,.empty{padding:18px;text-align:center;color:#7b8799;font-size:13px;background:#fff;border:1px dashed #d9e0eb;border-radius:12px}

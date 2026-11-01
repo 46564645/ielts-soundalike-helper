@@ -50,7 +50,7 @@ assert.match(content, /const isCached = \/\^data:/,
 assert.match(content, /const key = P\.normalizeWord\(word\) \+ "\|" \+ settings\.accent/,
   "cache must be keyed by word and accent");
 assert.match(content, /chooseStudyAudioMode\(value\)/);
-assert.match(content, /ielts-native-audio-request-backup/);
+assert.match(content, /ielts-native-audio-manual-stop/);
 assert.match(content, /data-ielts-helper-backup/);
 assert.match(content, /native-unobserved/);
 assert.doesNotMatch(content, /textContent = studyBackup\.word/,

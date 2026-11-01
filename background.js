@@ -9,6 +9,7 @@ const CORPUS_SUMMARY = globalThis.IELTS_CORPUS_SUMMARY || { total: VOCABULARY.le
 const BY_WORD = new Map(VOCABULARY.map((item) => [P.normalizeWord(item.word), item]));
 const ipaCache = new Map();
 const audioCache = new Map();
+const audioPersistence = new Map();
 const MAX_AUDIO_CACHE = 120;
 const SOUND_FAVORITES_KEY = "soundSpellingFavoritesV1";
 const DEEPSEEK_CACHE_KEY = "deepseekWordCacheV1";
@@ -108,23 +109,32 @@ async function prefetchAudioWords(rawWords, rawAccent) {
   const accent = normalizeAccent(rawAccent);
   const unique = [...new Set((Array.isArray(rawWords) ? rawWords : [])
     .filter((word) => typeof word === "string" && /^[a-z][a-z' -]{0,70}$/i.test(word))
-    .map((word) => P.normalizeWord(word)))].filter(Boolean).slice(0, 20);
+    .map((word) => P.normalizeWord(word)))].filter(Boolean).slice(0, 50);
   let cursor = 0;
   const statuses = {};
+  const failureReasons = {};
   async function worker() {
     while (cursor < unique.length) {
       const word = unique[cursor++];
       const item = BY_WORD.get(word) || { word, ukSpeech: "" };
+      const cacheKey = `${accent}:${P.normalizeWord(item.word)}`;
       try {
         const url = await fetchAudio(item, accent);
-        statuses[word] = url ? "ready" : "failed";
-      } catch {
+        statuses[word] = url ? (audioPersistence.get(cacheKey) ? "ready" : "memory") : "failed";
+      } catch (error) {
         statuses[word] = "failed";
+        failureReasons[word] = readableError(error).slice(0, 120);
       }
     }
   }
   await Promise.all(Array.from({ length: Math.min(3, unique.length) }, worker));
-  return { count: Object.values(statuses).filter((status) => status === "ready").length, statuses, total: unique.length };
+  return {
+    count: Object.values(statuses).filter((status) => status === "ready").length,
+    memoryCount: Object.values(statuses).filter((status) => status === "memory").length,
+    statuses,
+    total: unique.length,
+    error: Object.values(failureReasons)[0] || ""
+  };
 }
 
 async function getComparisonAudio(rawWord, rawAccent) {
@@ -652,10 +662,14 @@ async function fetchAudio(item, accent) {
   // Do not serve a failed/empty network response as cached audio.
   let blob = null;
   let store = null;
+  let persisted = false;
   try {
     store = await caches.open("ielts-word-audio-v1");
     const cached = await store.match(remoteUrl);
-    if (cached?.ok) blob = await cached.blob();
+    if (cached?.ok) {
+      blob = await cached.blob();
+      persisted = Boolean(blob?.size);
+    }
   } catch {
     // CacheStorage may be unavailable in some iOS extension runtimes.
   }
@@ -669,6 +683,7 @@ async function fetchAudio(item, accent) {
         await store.put(remoteUrl, new Response(blob, {
           headers: { "Content-Type": blob.type || "audio/mpeg" }
         }));
+        persisted = true;
         // Bound persistent storage as well as the existing in-memory LRU.
         const entries = await store.keys();
         for (const stale of entries.slice(0, Math.max(0, entries.length - MAX_AUDIO_CACHE))) {
@@ -681,7 +696,12 @@ async function fetchAudio(item, accent) {
   }
   const dataUrl = await blobToDataUrl(blob);
   audioCache.set(key, dataUrl);
-  while (audioCache.size > MAX_AUDIO_CACHE) audioCache.delete(audioCache.keys().next().value);
+  audioPersistence.set(key, persisted);
+  while (audioCache.size > MAX_AUDIO_CACHE) {
+    const stale = audioCache.keys().next().value;
+    audioCache.delete(stale);
+    audioPersistence.delete(stale);
+  }
   return dataUrl;
 }
 

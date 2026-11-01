@@ -142,6 +142,8 @@
     const control = findIdictationAnswerControl(event.target);
     if (!control) return;
     const choice = textOf(control);
+    stopStudyBackupPlayback();
+    document.dispatchEvent(new Event("ielts-native-audio-reset"));
     const clue = readIdictationCurrentClue();
     const completedBefore = readIdictationCompletedDetails();
     const pending = {
@@ -220,6 +222,8 @@
         : null;
       if (!input || !isLearningMode()) return;
       if (isIdictationSpellingJudged()) {
+        stopStudyBackupPlayback();
+        document.dispatchEvent(new Event("ielts-native-audio-reset"));
         markAsPrevious();
         queuePrefetch();
         return;
@@ -352,6 +356,8 @@
     const spelling = readIdictationSpellingDetails();
     if (spelling?.word) {
       const signature = `word:${P.normalizeWord(spelling.word)}|${idictationClueSignature(spelling)}`;
+      startNewStudyQuestion(signature);
+      prepareStudyBackup(spelling.word, true);
       if (signature !== idictationClueKey) {
         idictationClueKey = signature;
         idictationResolveRun += 1;
@@ -360,14 +366,21 @@
       return;
     }
     const clue = readIdictationCurrentClue();
-    if (!clue?.ipa) return;
+    if (!clue?.ipa) {
+      startNewStudyQuestion("waiting");
+      return;
+    }
     const clueKey = idictationClueSignature(clue);
-    if (!clueKey || clueKey === idictationClueKey) return;
+    if (!clueKey) return;
+    startNewStudyQuestion("clue:" + clueKey);
+    if (clueKey === idictationClueKey) return;
     idictationClueKey = clueKey;
     const run = ++idictationResolveRun;
     sendMessage({ type: "RESOLVE_CLUE", ipa: clue.ipa, meaning: clue.meaning })
       .then((response) => {
         if (run !== idictationResolveRun || clueKey !== idictationClueKey || !response?.ok || !response.found) return;
+        if (response.audioMatchSafe === true) prepareStudyBackup(response.word, true);
+        else prepareStudyBackup("", false);
         const key = P.normalizeWord(response.word);
         const changed = Boolean(currentWordKey && key && key !== currentWordKey);
         currentWordKey = key;
@@ -1390,11 +1403,12 @@
     const bridgeReady = isStudyNativeBridgeReady();
     for (const [name, button] of Object.entries(ui.buttons)) {
       const selected = mode === name;
-      const color = selected ? "#c8f1ed" : "#fff";
-      const background = selected ? "#126b75" : "#29445a";
-      if (button.style.color !== color) button.style.color = color;
-      if (button.style.backgroundColor !== background) button.style.backgroundColor = background;
-      button.setAttribute("aria-pressed", String(selected));
+      if (button.dataset.selected !== String(selected)) {
+        button.dataset.selected = String(selected);
+        button.style.color = selected ? "#c8f1ed" : "#fff";
+        button.style.backgroundColor = selected ? "#126b75" : "#29445a";
+        button.setAttribute("aria-pressed", String(selected));
+      }
       button.disabled = name === "force" && !bridgeReady;
     }
     const replayDisabled = !bridgeReady || !hasStudyBackup() || mode === "off";

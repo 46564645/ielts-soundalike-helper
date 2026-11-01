@@ -51,6 +51,18 @@ assert.match(content, /const key = P\.normalizeWord\(word\) \+ "\|" \+ settings\
   "cache must be keyed by word and accent");
 assert.match(content, /chooseStudyAudioMode\(value\)/);
 assert.match(content, /ielts-native-audio-manual-stop/);
+assert.match(content, /class="current-backup-play"/);
+assert.match(content, /class="future-cache-status"/);
+const requestStart = content.indexOf("function requestStudyBackupReplay() {");
+const requestEnd = content.indexOf("function ensureStudyAudioControls()", requestStart);
+assert(requestStart >= 0 && requestEnd > requestStart);
+const requestBlock = content.slice(requestStart, requestEnd);
+assert.match(requestBlock, /playCurrentStudyBackup\(\)/);
+assert.doesNotMatch(requestBlock, /isStudyNativeBridgeReady\(\)/,
+  "direct UI playback cannot require website player detection");
+assert.doesNotMatch(requestBlock, /settings\.audioTakeoverMode\) === "off"/,
+  "a direct click should be able to audition saved audio independently of automatic mode");
+
 assert.match(content, /data-ielts-helper-backup/);
 assert.match(content, /native-unobserved/);
 assert.doesNotMatch(content, /textContent = studyBackup\.word/,

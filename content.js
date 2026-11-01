@@ -60,12 +60,7 @@
     }
     if (changes.overlayReopenNonce) {
       settings.overlayReopenNonce = changes.overlayReopenNonce.newValue;
-      closedForSession = false;
-      if (lastResult && settings.enabled) {
-        ensureOverlay();
-        overlayHost.hidden = false;
-        renderResult(lastResult);
-      }
+      if (settings.enabled) openResultPanel();
     }
   });
 

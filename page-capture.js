@@ -12,6 +12,12 @@
       if (requestUrl.includes(ARTICLE_LIST_PATH)) {
         pending.then((response) => response.clone().json()).then(capturePayload).catch(() => {});
       }
+      if (isStudyDataRequest(requestUrl)) {
+        pending.then((response) => {
+          if (!String(response.headers.get("content-type") || "").includes("json")) return null;
+          return response.clone().json();
+        }).then(captureFutureWordQueue).catch(() => {});
+      }
       return pending;
     };
   }
@@ -23,18 +29,73 @@
     return xhrOpen.call(this, method, url, ...rest);
   };
   XMLHttpRequest.prototype.send = function (...args) {
-    if (String(this.__ieltsCaptureUrl || "").includes(ARTICLE_LIST_PATH)) {
+    const requestUrl = String(this.__ieltsCaptureUrl || "");
+    if (requestUrl.includes(ARTICLE_LIST_PATH) || isStudyDataRequest(requestUrl)) {
       this.addEventListener("load", () => {
         try {
           const payload = this.responseType === "json" ? this.response : JSON.parse(this.responseText);
-          capturePayload(payload);
+          if (requestUrl.includes(ARTICLE_LIST_PATH)) capturePayload(payload);
+          if (isStudyDataRequest(requestUrl)) captureFutureWordQueue(payload);
         } catch {
-          // Ignore non-JSON or inaccessible responses without affecting the website.
+          // Never affect the site's response processing.
         }
       }, { once: true });
     }
     return xhrSend.apply(this, args);
   };
+
+  // Observe only data already delivered to the user's current study session.
+  // Never request hidden endpoints, advance questions or reveal upcoming answers.
+  const QUEUE_ATTRIBUTE = "data-ielts-future-audio-queue";
+  let lastQueueSignature = "";
+  function isStudyDataRequest(url) {
+    if (location.hostname !== "www.idictation.cn" || location.pathname !== "/home") return false;
+    try {
+      const parsed = new URL(url, location.href);
+      return parsed.origin === location.origin && /\\/api\\//i.test(parsed.pathname)
+        && /(?:study|dictation|word|review|learn|train|practice|exercise|session|task|list)/i.test(parsed.pathname);
+    } catch {
+      return false;
+    }
+  }
+  function extractEnglishWord(row) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return "";
+    const raw = row.word ?? row.wordName ?? row.word_name ?? row.english ?? row.vocabulary;
+    if (typeof raw !== "string") return "";
+    const word = raw.trim().toLowerCase();
+    return /^[a-z][a-z' -]{0,65}$/i.test(word) ? word : "";
+  }
+  function captureFutureWordQueue(payload) {
+    if (!payload || typeof payload !== "object") return;
+    const pending = [{ data: payload, depth: 0 }];
+    let bestWords = [];
+    let examined = 0;
+    while (pending.length && examined++ < 350) {
+      const { data, depth } = pending.shift();
+      if (Array.isArray(data)) {
+        const words = data.slice(0, 120).map(extractEnglishWord).filter(Boolean);
+        if (words.length >= 3 && words.length > bestWords.length && words.length >= Math.ceil(data.length * 0.6)) {
+          bestWords = words;
+        }
+        if (depth < 6) for (const value of data.slice(0, 80)) {
+          if (value && typeof value === "object") pending.push({ data: value, depth: depth + 1 });
+        }
+      } else if (data && typeof data === "object" && depth < 6) {
+        for (const value of Object.values(data).slice(0, 40)) {
+          if (value && typeof value === "object") pending.push({ data: value, depth: depth + 1 });
+        }
+      }
+    }
+    const words = [...new Set(bestWords)].slice(0, 50);
+    if (words.length < 3) return;
+    const signature = words.join("|");
+    if (signature === lastQueueSignature) return;
+    lastQueueSignature = signature;
+    document.documentElement?.setAttribute(QUEUE_ATTRIBUTE, JSON.stringify({
+      words, detected: words.length, observedAt: Date.now()
+    }));
+    document.dispatchEvent(new CustomEvent("ielts-future-audio-queue-ready"));
+  }
 
   function capturePayload(payload) {
     const rows = findSentenceRows(payload);

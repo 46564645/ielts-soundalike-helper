@@ -10,12 +10,13 @@ const BY_WORD = new Map(VOCABULARY.map((item) => [P.normalizeWord(item.word), it
 const ipaCache = new Map();
 const audioCache = new Map();
 const audioPersistence = new Map();
+const audioStorageIssues = new Map();
 const audioInFlight = new Map();
 const AUDIO_LOCAL_PREFIX = "wordAudioV2:";
 const AUDIO_LOCAL_INDEX = "wordAudioIndexV2";
 const AUDIO_LOCAL_MAX_ITEMS = 60;
 const AUDIO_LOCAL_MAX_CHARS = 3500000;
-const AUDIO_LOCAL_MAX_ITEM_CHARS = 100000;
+const AUDIO_LOCAL_MAX_ITEM_CHARS = 200000;
 let localAudioWriteChain = Promise.resolve();
 const MAX_AUDIO_CACHE = 120;
 const SOUND_FAVORITES_KEY = "soundSpellingFavoritesV1";
@@ -112,6 +113,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 // Prefetch is intentionally bounded and never triggers speech or page playback.
+// Download short batches quietly: rapid parallel requests can cause audio
+// service rate limits or suspension of the Orion iOS extension worker.
 async function prefetchAudioWords(rawWords, rawAccent) {
   const accent = normalizeAccent(rawAccent);
   const unique = [...new Set((Array.isArray(rawWords) ? rawWords : [])
@@ -119,35 +122,49 @@ async function prefetchAudioWords(rawWords, rawAccent) {
     .map((word) => P.normalizeWord(word)))].filter(Boolean).slice(0, 50);
   let cursor = 0;
   const statuses = {};
-  const failureReasons = {};
+  const reasons = {};
+  const storageReasons = {};
   async function worker() {
     while (cursor < unique.length) {
       const word = unique[cursor++];
       const item = BY_WORD.get(word) || { word, ukSpeech: "" };
-      const cacheKey = `${accent}:${P.normalizeWord(item.word)}`;
-      try {
-        const url = await fetchAudio(item, accent);
-        statuses[word] = url ? (audioPersistence.get(cacheKey) ? "ready" : "memory") : "failed";
-      } catch (error) {
-        statuses[word] = "failed";
-        failureReasons[word] = readableError(error).slice(0, 120);
+      const cacheKey = accent + ":" + P.normalizeWord(item.word);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const url = await fetchAudio(item, accent);
+          statuses[word] = url ? (audioPersistence.get(cacheKey) ? "ready" : "memory") : "failed";
+          if (statuses[word] === "memory") {
+            storageReasons[word] = audioStorageIssues.get(cacheKey) || "浏览器不支持持久化缓存";
+          }
+          break;
+        } catch (error) {
+          const reason = formatAudioFailure(readableError(error));
+          if (attempt === 0 && /^(请求超时|音频源请求过多|网络或扩展权限限制|音频服务器暂时异常)$/.test(reason)) {
+            await delay(500);
+            continue;
+          }
+          statuses[word] = "failed";
+          reasons[word] = reason;
+        }
       }
+      if (cursor < unique.length) await delay(180);
     }
   }
-  await Promise.all(Array.from({ length: Math.min(3, unique.length) }, worker));
-  const failureTypes = {};
-  for (const reason of Object.values(failureReasons)) {
-    const label = formatAudioFailure(reason);
-    failureTypes[label] = (failureTypes[label] || 0) + 1;
-  }
+  await Promise.all(Array.from({ length: Math.min(2, unique.length) }, worker));
+  const failures = {};
+  const memoryFailures = {};
+  for (const reason of Object.values(reasons)) failures[reason] = (failures[reason] || 0) + 1;
+  for (const reason of Object.values(storageReasons)) memoryFailures[reason] = (memoryFailures[reason] || 0) + 1;
   return {
     count: Object.values(statuses).filter((status) => status === "ready").length,
     memoryCount: Object.values(statuses).filter((status) => status === "memory").length,
-    statuses,
-    total: unique.length,
-    failures: failureTypes,
-    error: Object.keys(failureTypes).map((reason) => `${reason}（${failureTypes[reason]}）`).join("；")
+    statuses, reasons, storageReasons, total: unique.length, failures, memoryFailures,
+    error: Object.entries(failures).map(([reason, count]) => reason + "（" + count + "）").join("；")
   };
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function getComparisonAudio(rawWord, rawAccent) {
@@ -728,6 +745,9 @@ async function loadAudio(item, accent) {
     }
     blob = await response.blob();
     if (!blob.size) throw new Error("音频内容为空");
+    if (/^(?:text\/html|text\/plain|application\/json)/i.test(blob.type)) {
+      throw new Error("音频源返回网页而非音频");
+    }
     if (blob.size > 2 * 1024 * 1024) throw new Error("音频文件过大");
     if (store) {
       try {
@@ -747,6 +767,7 @@ async function loadAudio(item, accent) {
   }
   const dataUrl = await blobToDataUrl(blob);
   if (!persisted) persisted = await storeAudioLocally(key, dataUrl);
+  if (persisted) audioStorageIssues.delete(key);
   rememberAudio(key, dataUrl, persisted);
   return dataUrl;
 }
@@ -763,6 +784,7 @@ function rememberAudio(key, dataUrl, persisted) {
 
 function storeAudioLocally(key, dataUrl) {
   if (typeof dataUrl !== "string" || dataUrl.length > AUDIO_LOCAL_MAX_ITEM_CHARS) {
+    audioStorageIssues.set(key, "单词音频过大，未能保存到本地");
     return Promise.resolve(false);
   }
   const task = localAudioWriteChain.catch(() => {}).then(async () => {
@@ -785,7 +807,11 @@ function storeAudioLocally(key, dataUrl) {
     return true;
   });
   localAudioWriteChain = task.catch(() => {});
-  return task.catch(() => false);
+  return task.catch((error) => {
+    audioStorageIssues.set(key, /quota|配额/i.test(readableError(error))
+      ? "本地存储空间不足" : "本地保存失败：" + readableError(error).slice(0, 80));
+    return false;
+  });
 }
 
 function storageRemove(keys) {
@@ -818,6 +844,7 @@ function formatAudioFailure(message) {
   if (/403|401/.test(text)) return "音频源拒绝访问";
   if (/404/.test(text)) return "音频源不存在";
   if (/429/.test(text)) return "音频源请求过多";
+  if (/5\d\d/.test(text)) return "音频服务器暂时异常";
   if (/网络|fetch|connection|network|cors|load failed/i.test(text)) return "网络或扩展权限限制";
   if (/为空|过大|blob|data/i.test(text)) return "音频内容异常";
   return text.slice(0, 70);

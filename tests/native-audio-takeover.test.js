@@ -155,6 +155,28 @@ function harness() {
   await extension.play();
   assert.equal(extension.playCount, 1, "extension's own audio must bypass interception");
 
+  // A terminated/blocked extension must never keep the website silent.
+  h.document.dispatchEvent({ type: "ielts-native-audio-reset" });
+  h.root.setAttribute("data-ielts-audio-takeover-mode", "auto");
+  const silent = new h.FakeMedia();
+  await silent.play();
+  h.tick(2200);
+  assert.equal(silent.playCount, 1);
+  h.tick(3100);
+  assert.equal(silent.playCount, 2, "unacknowledged backup must restore original");
+  assert.equal(h.emitted.at(-1).type, "backup-timeout");
+
+  // But a real successful backup acknowledgement must not revive native audio.
+  h.document.dispatchEvent({ type: "ielts-native-audio-reset" });
+  const speaking = new h.FakeMedia();
+  await speaking.play();
+  h.tick(2200);
+  const ticket = h.emitted.at(-1).ticket;
+  assert.ok(ticket > 0);
+  h.root.setAttribute("data-ielts-fallback-started", String(ticket));
+  h.tick(3100);
+  assert.equal(speaking.playCount, 1, "confirmed backup playback must keep native audio paused");
+
   h.root.setAttribute("data-ielts-audio-takeover-mode", "off");
   h.document.dispatchEvent({ type: "ielts-native-audio-mode-change" });
   const original = new h.FakeMedia();

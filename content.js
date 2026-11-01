@@ -1516,6 +1516,9 @@
   function installResizing(panel) {
     if (!("ResizeObserver" in window)) return;
     const observer = new ResizeObserver(() => {
+      // Mobile geometry is saved at pointer-up, not continuously while dragging.
+      // ResizeObserver writes during drag can fight the user's finger on iOS.
+      if (isMobileOverlay()) return;
       window.clearTimeout(resizeSaveTimer);
       resizeSaveTimer = window.setTimeout(() => {
         const rect = panel.getBoundingClientRect();
@@ -1560,23 +1563,30 @@
   }
 
   function resizeMobileSheet(handle, event) {
+    // Pull the header almost all the way to the bottom, or upward to full
+    // screen. Unlike the old 42vh/220px clamp, only the 58px grab bar remains.
     const startY = event.clientY;
     const originHeight = overlayUi.panel.getBoundingClientRect().height;
+    let lastHeight = originHeight;
     try { handle.setPointerCapture(event.pointerId); } catch {}
     const move = (moveEvent) => {
-      const nextHeight = clampMobileHeight(originHeight - (moveEvent.clientY - startY));
-      overlayUi.panel.style.height = `${nextHeight}px`;
+      if (moveEvent.pointerId !== event.pointerId) return;
+      lastHeight = clampMobileHeight(originHeight - (moveEvent.clientY - startY));
+      overlayUi.panel.style.height = `${lastHeight}px`;
+      // Do not move or scroll the page when the grab handle is dragged.
+      if (moveEvent.cancelable) moveEvent.preventDefault();
     };
-    const finish = () => {
+    const finish = (endEvent) => {
+      if (endEvent.pointerId !== event.pointerId) return;
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", finish);
       handle.removeEventListener("pointercancel", finish);
-      const height = Math.round(overlayUi.panel.getBoundingClientRect().height);
-      chrome.storage.local.set({ overlayMobileHeight: height });
+      try { handle.releasePointerCapture(event.pointerId); } catch {}
+      chrome.storage.local.set({ overlayMobileHeight: Math.round(lastHeight) });
     };
     handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", finish, { once: true });
-    handle.addEventListener("pointercancel", finish, { once: true });
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
   }
 
   function handleViewportChange() {
@@ -1629,8 +1639,12 @@
   function clampMobileHeight(value) {
     const viewportHeight = availableViewportHeight();
     const maxHeight = Math.max(1, viewportHeight - 8);
-    const minHeight = Math.min(maxHeight, Math.max(220, Math.round(viewportHeight * 0.42)));
-    return Math.min(maxHeight, Math.max(minHeight, Number(value) || Math.round(viewportHeight * 0.78)));
+    // A collapsed sheet must keep its header/close control accessible.
+    // No arbitrary minimum percentage or fixed 220px threshold.
+    const minHeight = Math.min(maxHeight, 60);
+    const preferred = Number.isFinite(Number(value)) && Number(value) > 0
+      ? Number(value) : Math.round(viewportHeight * 0.78);
+    return Math.min(maxHeight, Math.max(minHeight, preferred));
   }
 
   function clampHostPosition() {
@@ -1900,8 +1914,8 @@
       .learning{margin-top:12px;padding:12px}.learning-total{font-size:10px;color:#78859a;text-align:right}.sound-ranking-list{display:grid;gap:6px;margin-top:8px}.sound-ranking-item{display:grid;grid-template-columns:22px minmax(105px,.8fr) minmax(0,1.2fr);align-items:center;gap:7px;padding:7px 8px;border-radius:9px;background:#f7f9fd}.ranking-index{display:grid;place-items:center;width:20px;height:20px;border-radius:6px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:900}.ranking-mapping{display:flex;align-items:center;gap:5px}.ranking-sound{padding:2px 5px;border:0;border-radius:5px;background:transparent;color:#2f4b90;font-size:15px;font-weight:900;cursor:pointer}.ranking-sound:hover{background:#e9edff}.ranking-arrow{color:#929daf;font-size:10px}.ranking-grapheme{min-width:22px;padding:2px 5px;border-radius:5px;background:#e6fcf5;color:#087f5b;font-size:14px;text-align:center}.ranking-details{display:grid;justify-items:end;min-width:0}.ranking-count{color:#c17900;font-size:9px}.ranking-details small{max-width:100%;overflow:hidden;color:#7b8799;font-size:8px;text-overflow:ellipsis;white-space:nowrap}.open-sound-favorites{width:100%;height:32px;margin-top:8px;border:1px solid #d8def0;border-radius:8px;background:#fff;color:#4058a9;font-size:10px;font-weight:800;cursor:pointer}.open-sound-favorites:hover{border-color:#aebbea;background:#f1f3ff}
       .candidate-section{margin-top:10px}.section-title{display:flex;align-items:center;justify-content:space-between;margin:0 2px 7px}.section-title>div{display:flex;flex-direction:column;gap:1px}.section-title strong{font-size:13px}.section-title small{font-size:9px;color:#7a8698}.candidate-count{padding:3px 7px;color:#ff514c;background:#ffe9e7;font-size:10px}.candidates{display:grid;gap:6px}.candidate-card{padding:9px 10px}.candidate-card.typed-candidate{border-color:#8fa1e6;background:linear-gradient(135deg,#f6f8ff,#fff)}.candidate-top{gap:8px}.candidate-identity{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}.audio-cache-dot{display:inline-block;flex:none;width:8px;height:8px;border-radius:50%;background:#9ca3af;box-shadow:0 0 0 2px #fff}.audio-cache-dot[data-state="loading"]{background:#d4a23b}.audio-cache-dot[data-state="ready"]{background:#168a9a}.audio-cache-dot[data-state="failed"]{background:#d34f4f}.audio-cache-summary{font-size:10px}.candidate-word{font-size:20px;line-height:1.15;color:#172033}.match-badge{font-size:9px;padding:2px 5px;color:#4058a9;background:#e9edff}.priority-badge{font-size:9px;padding:2px 5px;color:#9b5200;background:#fff0c7}.book-badge{font-size:9px;padding:2px 5px;color:#506076;background:#eef2f7}.candidate-controls{display:grid;flex:0 0 52px;gap:4px;width:52px}.candidate-controls .audio-button,.candidate-controls .favorite-button{width:52px;min-width:52px}.candidate-controls .audio-button{height:30px;border-radius:8px}.candidate-ipa{font-size:20px;margin-top:1px}.candidate-meaning{margin:3px 0 0;color:#45536b;font-size:11px;line-height:1.4}.favorite-button{height:27px;padding:0 8px;border:1px solid #ffaaa5;border-radius:8px;background:#fff5f4;color:#d94841;font-size:9px;font-weight:800;white-space:nowrap;cursor:pointer}.favorite-button:hover{background:#ffe7e5}.favorite-button.saved{border-color:#b8decf;background:#e9f8f2;color:#087f5b}.favorite-button:disabled{cursor:default;opacity:.8}.candidate-favorite{padding:0 3px}
       @media(max-width:820px){
-        .panel{width:100vw;min-width:100vw;height:min(78dvh,720px);min-height:min(340px,42dvh);max-width:100vw;max-height:calc(100dvh - 8px);resize:none;border-width:1px 0 0;border-radius:20px 20px 0 0;box-shadow:0 -14px 50px rgba(22,35,58,.24)}
-        .drag-handle{position:relative;flex:0 0 58px;height:58px;padding:8px 8px 0 16px;cursor:ns-resize}.drag-handle::before{content:"";position:absolute;top:6px;left:50%;width:38px;height:4px;border-radius:99px;background:rgba(255,255,255,.58);transform:translateX(-50%)}.drag-handle strong{font-size:15px}.previous{font-size:11px}.close{width:44px;height:44px;border-radius:12px;font-size:27px;touch-action:manipulation}
+        .panel{width:100vw;min-width:100vw;height:min(78dvh,720px);min-height:60px;max-width:100vw;max-height:calc(100dvh - 8px);resize:none;border-width:1px 0 0;border-radius:20px 20px 0 0;box-shadow:0 -14px 50px rgba(22,35,58,.24)}
+        .drag-handle{position:relative;flex:0 0 58px;height:58px;padding:8px 8px 0 16px;cursor:ns-resize;touch-action:none}.drag-handle::before{content:"";position:absolute;top:6px;left:50%;width:38px;height:4px;border-radius:99px;background:rgba(255,255,255,.58);transform:translateX(-50%)}.drag-handle strong{font-size:15px}.previous{font-size:11px}.close{width:44px;height:44px;border-radius:12px;font-size:27px;touch-action:manipulation}
         .body{padding:10px 10px max(54px,env(safe-area-inset-bottom));min-height:0;overflow-y:scroll;touch-action:pan-y;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch}.result-line{margin-bottom:8px}.status{font-size:12px;padding:5px 8px}.accent{font-size:11px}
         .target-card{padding:12px}.word{font-size:24px}.target-ipa{font-size:23px}.meaning{font-size:13px}.audio-button{min-width:44px;height:44px;touch-action:manipulation}.shortcut-key{display:none}
         .analysis{padding:11px}.sound-mapping-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch}.sound-mapping{width:100%;min-width:0;min-height:64px}.mapping-sound{min-height:32px}.mapping-example{font-size:10px}

@@ -29,6 +29,8 @@
   let futureCacheGeneration = 0;
   let futureCacheBadge = null;
   let futureCache = { phase: "waiting", total: 0, done: 0, ready: 0, memory: 0, failed: 0, error: "" };
+  let futureCacheWords = [];
+  const futureCacheStatuses = new Map();
 
   chrome.storage.sync.get(DEFAULTS, (saved) => {
     settings = { ...DEFAULTS, ...saved };
@@ -136,13 +138,23 @@
       state: inferIdictationChoiceState(choice, clue?.meaning),
       clueKey: idictationClueSignature(clue),
       completedBefore: P.normalizeWord(completedBefore?.word || ""),
+      choiceNode: control,
       startedAt: Date.now()
     };
     window.clearInterval(idictationRevealTimer);
     idictationRevealTimer = window.setInterval(() => {
       const completed = readIdictationCompletedDetails();
       const completedKey = P.normalizeWord(completed?.word || "");
-      if (completed?.word && completedKey && completedKey !== pending.completedBefore) {
+      const clueAfter = idictationClueSignature(readIdictationCurrentClue());
+      const movedToNextQuestion = Boolean(clueAfter && pending.clueKey && clueAfter !== pending.clueKey);
+      const answerChoiceWasReplaced = !pending.choiceNode.isConnected || textOf(pending.choiceNode) !== pending.choice;
+      const repeatedWordCompleted = Boolean(
+        completedKey && completedKey === pending.completedBefore &&
+        (movedToNextQuestion || answerChoiceWasReplaced) &&
+        Date.now() - pending.startedAt >= 150
+      );
+      if (completed?.word && completedKey &&
+        (completedKey !== pending.completedBefore || repeatedWordCompleted)) {
         window.clearInterval(idictationRevealTimer);
         idictationRevealTimer = 0;
         const nextClueKey = idictationClueSignature(readIdictationCurrentClue());
@@ -306,6 +318,8 @@
   function primeCurrentWord() {
     if (!settings.enabled || !isLearningMode()) return;
     if (IS_IDICTATION) {
+      if (!futureCacheBadge) updateFutureCacheDisplay();
+      else if (futureCacheBadge.hidden) futureCacheBadge.hidden = false;
       primeIdictationCurrentWord();
       return;
     }

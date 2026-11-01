@@ -1,5 +1,10 @@
 (function () {
   "use strict";
+  // The Orion package supports both native MAIN-world injection and a
+  // Safari script-tag fallback. Never register duplicate fetch/play/click
+  // interceptors if both methods succeed.
+  if (window.__ieltsSoundalikeMainBridgeV211) return;
+  window.__ieltsSoundalikeMainBridgeV211 = true;
 
   const ARTICLE_LIST_PATH = "/api/study/article/v1/list";
   const TRANSCRIPT_ATTRIBUTE = "data-ielts-speaking-transcript";

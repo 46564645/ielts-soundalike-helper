@@ -990,5 +990,9 @@ function normalizeAccent(value) {
 }
 
 function readableError(error) {
-  return error instanceof Error ? error.message : "处理失败";
+  // Chrome / Orion runtime.lastError is often a plain object, not an Error.
+  // Retain its message so a storage quota failure is diagnosable.
+  if (error && typeof error.message === "string") return error.message;
+  if (typeof error === "string") return error;
+  return "处理失败";
 }

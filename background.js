@@ -669,6 +669,11 @@ async function fetchAudio(item, accent) {
         await store.put(remoteUrl, new Response(blob, {
           headers: { "Content-Type": blob.type || "audio/mpeg" }
         }));
+        // Bound persistent storage as well as the existing in-memory LRU.
+        const entries = await store.keys();
+        for (const stale of entries.slice(0, Math.max(0, entries.length - MAX_AUDIO_CACHE))) {
+          await store.delete(stale);
+        }
       } catch {
         // Continue with memory caching when persistent storage is unavailable.
       }

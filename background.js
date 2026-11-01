@@ -9,6 +9,15 @@ const CORPUS_SUMMARY = globalThis.IELTS_CORPUS_SUMMARY || { total: VOCABULARY.le
 const BY_WORD = new Map(VOCABULARY.map((item) => [P.normalizeWord(item.word), item]));
 const ipaCache = new Map();
 const audioCache = new Map();
+const audioPersistence = new Map();
+const audioStorageIssues = new Map();
+const audioInFlight = new Map();
+const AUDIO_LOCAL_PREFIX = "wordAudioV2:";
+const AUDIO_LOCAL_INDEX = "wordAudioIndexV2";
+const AUDIO_LOCAL_MAX_ITEMS = 60;
+const AUDIO_LOCAL_MAX_CHARS = 3500000;
+const AUDIO_LOCAL_MAX_ITEM_CHARS = 200000;
+let localAudioWriteChain = Promise.resolve();
 const MAX_AUDIO_CACHE = 120;
 const SOUND_FAVORITES_KEY = "soundSpellingFavoritesV1";
 const DEEPSEEK_CACHE_KEY = "deepseekWordCacheV1";
@@ -21,6 +30,12 @@ const SPEAKING_JOB_KEY = "speakingExtractionJobV1";
 const SPEAKING_MODEL = "deepseek-v4-pro";
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "PREFETCH_AUDIO_WORDS") {
+    prefetchAudioWords(message.words, message.accent)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, count: 0, error: readableError(error) }));
+    return true;
+  }
   if (message?.type === "PREPARE_WORD") {
     prepareWord(message.word, message.accent)
       .then((payload) => sendResponse({ ok: true, ...payload }))
@@ -96,6 +111,61 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   return false;
 });
+
+// Prefetch is intentionally bounded and never triggers speech or page playback.
+// Download short batches quietly: rapid parallel requests can cause audio
+// service rate limits or suspension of the Orion iOS extension worker.
+async function prefetchAudioWords(rawWords, rawAccent) {
+  const accent = normalizeAccent(rawAccent);
+  const unique = [...new Set((Array.isArray(rawWords) ? rawWords : [])
+    .filter((word) => typeof word === "string" && /^[a-z][a-z' -]{0,70}$/i.test(word))
+    .map((word) => P.normalizeWord(word)))].filter(Boolean).slice(0, 50);
+  let cursor = 0;
+  const statuses = {};
+  const reasons = {};
+  const storageReasons = {};
+  async function worker() {
+    while (cursor < unique.length) {
+      const word = unique[cursor++];
+      const item = BY_WORD.get(word) || { word, ukSpeech: "" };
+      const cacheKey = accent + ":" + P.normalizeWord(item.word);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const url = await fetchAudio(item, accent);
+          statuses[word] = url ? (audioPersistence.get(cacheKey) ? "ready" : "memory") : "failed";
+          if (statuses[word] === "memory") {
+            storageReasons[word] = audioStorageIssues.get(cacheKey) || "浏览器不支持持久化缓存";
+          }
+          break;
+        } catch (error) {
+          const reason = formatAudioFailure(readableError(error));
+          if (attempt === 0 && /^(请求超时|音频源请求过多|网络或扩展权限限制|音频服务器暂时异常)$/.test(reason)) {
+            await delay(500);
+            continue;
+          }
+          statuses[word] = "failed";
+          reasons[word] = reason;
+        }
+      }
+      if (cursor < unique.length) await delay(180);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(2, unique.length) }, worker));
+  const failures = {};
+  const memoryFailures = {};
+  for (const reason of Object.values(reasons)) failures[reason] = (failures[reason] || 0) + 1;
+  for (const reason of Object.values(storageReasons)) memoryFailures[reason] = (memoryFailures[reason] || 0) + 1;
+  return {
+    count: Object.values(statuses).filter((status) => status === "ready").length,
+    memoryCount: Object.values(statuses).filter((status) => status === "memory").length,
+    statuses, reasons, storageReasons, total: unique.length, failures, memoryFailures,
+    error: Object.entries(failures).map(([reason, count]) => reason + "（" + count + "）").join("；")
+  };
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function getComparisonAudio(rawWord, rawAccent) {
   const word = String(rawWord || "").trim();
@@ -226,7 +296,11 @@ function resolveWordFromClue(rawIpa, rawMeaning) {
     word: best.item.word,
     ipa: best.item.ukIpa,
     meaning: best.item.meaning,
-    confidence: best.score >= 1 ? "ipa+meaning" : "ipa"
+    confidence: best.score >= 1 ? "ipa+meaning" : "ipa",
+    // Do not take over an unanswered question with a guessed homophone.
+    // Exact/subset meaning and a clear margin over the runner-up are required.
+    audioMatchSafe: best.score >= 6 &&
+      (!matches[1] || best.score - matches[1].score >= 2)
   };
 }
 
@@ -616,33 +690,208 @@ async function fetchExactIpa(word) {
 async function fetchAudio(item, accent) {
   const key = `${accent}:${P.normalizeWord(item.word)}`;
   if (!P.normalizeWord(item.word)) return "";
-  if (audioCache.has(key)) return audioCache.get(key);
-  const remoteUrl = fallbackAudioUrl(item, accent);
-  const response = await fetch(remoteUrl, { cache: "force-cache", signal: AbortSignal.timeout(6500) });
-  if (!response.ok) throw new Error(`音频服务返回 ${response.status}`);
-  const blob = await response.blob();
-  if (!blob.size) throw new Error("音频为空");
+  // The same word can occur repeatedly in incorrect-answer review sessions.
+  // A simultaneous retry must reuse one download instead of opening another.
+  if (audioInFlight.has(key)) return audioInFlight.get(key);
+  const request = loadAudio(item, accent).finally(() => audioInFlight.delete(key));
+  audioInFlight.set(key, request);
+  return request;
+}
+
+async function loadAudio(item, accent) {
+  const key = `${accent}:${P.normalizeWord(item.word)}`;
+  if (!P.normalizeWord(item.word)) return "";
+  if (audioCache.has(key)) {
+    // In-memory audio is playable but might not survive a worker restart.
+    // Let an explicit retry attempt the storage operation again.
+    if (audioPersistence.get(key) === false) {
+      const restored = await storeAudioLocally(key, audioCache.get(key));
+      audioPersistence.set(key, restored);
+      if (restored) audioStorageIssues.delete(key);
+    }
+    return audioCache.get(key);
+  }
+  // On iOS Safari/Orion, the CacheStorage API may be absent. Keep a bounded
+  // local-storage copy so retrying a word still works after worker suspension.
+  try {
+    const locallyCached = (await storageGet({ [AUDIO_LOCAL_PREFIX + key]: "" }))[AUDIO_LOCAL_PREFIX + key];
+    if (typeof locallyCached === "string" && /^data:(?:audio\/|application\/octet-stream|binary\/octet-stream)/i.test(locallyCached)) {
+      rememberAudio(key, locallyCached, true);
+      return locallyCached;
+    }
+  } catch {
+    // Fall back to CacheStorage and network; never break the study page.
+  }
+  let remoteUrl = fallbackAudioUrl(item, accent);
+  // CacheStorage survives MV3 service-worker suspension, unlike the in-memory Map.
+  // Do not serve a failed/empty network response as cached audio.
+  let blob = null;
+  let store = null;
+  let persisted = false;
+  try {
+    store = await caches.open("ielts-word-audio-v1");
+    const cached = await store.match(remoteUrl);
+    if (cached?.ok) {
+      blob = await cached.blob();
+      persisted = Boolean(blob?.size);
+    }
+  } catch {
+    // CacheStorage may be unavailable in some iOS extension runtimes.
+  }
+  if (!blob?.size) {
+    let response;
+    try {
+      response = await fetchAudioWithTimeout(remoteUrl);
+      if (!response.ok) throw new Error(`音频服务返回 ${response.status}`);
+    } catch (originalError) {
+      // A listed UK audio file may have disappeared: retry the public
+      // dictionary pronunciation URL, without changing the website's audio.
+      if (!(accent === "uk" && item?.ukSpeech)) throw originalError;
+      const backupUrl = dictionaryAudioUrl(item.word, accent);
+      try {
+        response = await fetchAudioWithTimeout(backupUrl);
+        if (!response.ok) throw new Error(`备用发音返回 ${response.status}`);
+        remoteUrl = backupUrl;
+      } catch (backupError) {
+        throw new Error(`${readableError(originalError)}；备用：${readableError(backupError)}`);
+      }
+    }
+    blob = await response.blob();
+    if (!blob.size) throw new Error("音频内容为空");
+    if (/^(?:text\/html|text\/plain|application\/json)/i.test(blob.type)) {
+      throw new Error("音频源返回网页而非音频");
+    }
+    if (blob.size > 2 * 1024 * 1024) throw new Error("音频文件过大");
+    if (store) {
+      try {
+        await store.put(remoteUrl, new Response(blob, {
+          headers: { "Content-Type": blob.type || "audio/mpeg" }
+        }));
+        persisted = true;
+        // Bound persistent storage as well as the existing in-memory LRU.
+        const entries = await store.keys();
+        for (const stale of entries.slice(0, Math.max(0, entries.length - MAX_AUDIO_CACHE))) {
+          await store.delete(stale);
+        }
+      } catch {
+        // Continue with memory caching when persistent storage is unavailable.
+      }
+    }
+  }
   const dataUrl = await blobToDataUrl(blob);
-  audioCache.set(key, dataUrl);
-  while (audioCache.size > MAX_AUDIO_CACHE) audioCache.delete(audioCache.keys().next().value);
+  if (!persisted) persisted = await storeAudioLocally(key, dataUrl);
+  if (persisted) audioStorageIssues.delete(key);
+  rememberAudio(key, dataUrl, persisted);
   return dataUrl;
+}
+
+function rememberAudio(key, dataUrl, persisted) {
+  audioCache.set(key, dataUrl);
+  audioPersistence.set(key, persisted);
+  while (audioCache.size > MAX_AUDIO_CACHE) {
+    const stale = audioCache.keys().next().value;
+    audioCache.delete(stale);
+    audioPersistence.delete(stale);
+  }
+}
+
+function storeAudioLocally(key, dataUrl) {
+  if (typeof dataUrl !== "string" || dataUrl.length > AUDIO_LOCAL_MAX_ITEM_CHARS) {
+    audioStorageIssues.set(key, "单词音频过大，未能保存到本地");
+    return Promise.resolve(false);
+  }
+  const task = localAudioWriteChain.catch(() => {}).then(async () => {
+    const index = (await storageGet({ [AUDIO_LOCAL_INDEX]: [] }))[AUDIO_LOCAL_INDEX];
+    const entries = Array.isArray(index) ? index.filter((e) => e && typeof e.key === "string" && Number.isFinite(e.size)) : [];
+    const filtered = entries.filter((entry) => entry.key !== key);
+    filtered.push({ key, size: dataUrl.length });
+    let total = filtered.reduce((sum, entry) => sum + entry.size, 0);
+    const evicted = [];
+    while (filtered.length > AUDIO_LOCAL_MAX_ITEMS || total > AUDIO_LOCAL_MAX_CHARS) {
+      const oldest = filtered.shift();
+      total -= oldest.size;
+      evicted.push(AUDIO_LOCAL_PREFIX + oldest.key);
+    }
+    await storageSet({
+      [AUDIO_LOCAL_PREFIX + key]: dataUrl,
+      [AUDIO_LOCAL_INDEX]: filtered
+    });
+    if (evicted.length) await storageRemove(evicted);
+    return true;
+  });
+  localAudioWriteChain = task.catch(() => {});
+  return task.catch((error) => {
+    audioStorageIssues.set(key, /quota|配额/i.test(readableError(error))
+      ? "本地存储空间不足" : "本地保存失败：" + readableError(error).slice(0, 80));
+    return false;
+  });
+}
+
+function storageRemove(keys) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.remove(keys, () => {
+      if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+      else resolve();
+    });
+  });
+}
+
+async function fetchAudioWithTimeout(url, timeoutMs = 9000) {
+  // AbortSignal.timeout isn't supported by every Orion/WKWebView runtime.
+  // AbortController works in iOS extension workers and permits a real deadline.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { cache: "force-cache", signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("音频请求超时");
+    throw new Error(`音频网络请求失败：${readableError(error)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function formatAudioFailure(message) {
+  const text = String(message || "未知错误");
+  if (/超时|abort|timed? ?out/i.test(text)) return "请求超时";
+  if (/403|401/.test(text)) return "音频源拒绝访问";
+  if (/404/.test(text)) return "音频源不存在";
+  if (/429/.test(text)) return "音频源请求过多";
+  if (/5\d\d/.test(text)) return "音频服务器暂时异常";
+  if (/网络|fetch|connection|network|cors|load failed/i.test(text)) return "网络或扩展权限限制";
+  if (/为空|过大|blob|data/i.test(text)) return "音频内容异常";
+  return text.slice(0, 70);
+}
+
+function dictionaryAudioUrl(word, accent) {
+  const type = accent === "uk" ? 1 : 2;
+  return `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(word || "")}&type=${type}`;
 }
 
 function fallbackAudioUrl(item, accent) {
   if (accent === "uk" && item?.ukSpeech) {
     return `https://ai-oss3.oss-cn-shenzhen.aliyuncs.com/ielts_word/${encodeURIComponent(item.ukSpeech)}`;
   }
-  const type = accent === "uk" ? 1 : 2;
-  return `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(item?.word || "")}&type=${type}`;
+  return dictionaryAudioUrl(item?.word, accent);
 }
 
-function blobToDataUrl(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(reader.error || new Error("读取音频失败"));
-    reader.readAsDataURL(blob);
-  });
+async function blobToDataUrl(blob) {
+  // FileReader is not available in Chrome MV3 service workers (also varies in
+  // Orion). ArrayBuffer is worker-safe and doesn't rely on browser globals.
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const pieces = [];
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i], b = bytes[i + 1], c = bytes[i + 2];
+    pieces.push(
+      digits[a >> 2] +
+      digits[((a & 3) << 4) | ((b || 0) >> 4)] +
+      (i + 1 < bytes.length ? digits[((b & 15) << 2) | ((c || 0) >> 6)] : "=") +
+      (i + 2 < bytes.length ? digits[c & 63] : "=")
+    );
+  }
+  const contentType = String(blob.type || "audio/mpeg").replace(/[^a-z0-9/+.-]/gi, "") || "audio/mpeg";
+  return `data:${contentType};base64,${pieces.join("")}`;
 }
 
 async function toggleSoundSpellingFavorite(rawFavorite) {
@@ -745,5 +994,9 @@ function normalizeAccent(value) {
 }
 
 function readableError(error) {
-  return error instanceof Error ? error.message : "处理失败";
+  // Chrome / Orion runtime.lastError is often a plain object, not an Error.
+  // Retain its message so a storage quota failure is diagnosable.
+  if (error && typeof error.message === "string") return error.message;
+  if (typeof error === "string") return error;
+  return "处理失败";
 }

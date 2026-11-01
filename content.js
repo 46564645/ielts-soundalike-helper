@@ -6,7 +6,7 @@
   const COMPARISONS_KEY = "pronunciationComparisonsV1";
   const SOUND_FAVORITES_KEY = "soundSpellingFavoritesV1";
   const PHONEME_CLIP_MS = 1000;
-  const DEFAULTS = { enabled: true, accent: "us", overlayReopenNonce: 0 };
+  const DEFAULTS = { enabled: true, accent: "us", overlayReopenNonce: 0, audioTakeoverMode: "auto" };
   let settings = { ...DEFAULTS };
   let prepared = null;
   let currentWordKey = "";
@@ -25,9 +25,26 @@
   let idictationResolveRun = 0;
   let idictationRevealTimer = 0;
   let idictationSpellingTimer = 0;
+  let futureCacheQueueKey = "";
+  let futureCacheGeneration = 0;
+  let futureCacheBadge = null;
+  let futureCache = { phase: "waiting", total: 0, done: 0, ready: 0, memory: 0, failed: 0, error: "" };
+  let futureCacheWords = [];
+  const futureCacheStatuses = new Map();
+  const futureCacheFailureReasons = new Map();
+  const futureCacheStorageReasons = new Map();
+  let studyTakeoverUi = null;
+  let studyBackup = { word: "", key: "", url: "", kind: "none", loading: false, run: 0, error: "" };
+  let studyQuestionSignature = "";
+  let studyBackupAudio = null;
+  let studyBackupVoice = null;
+  let studyNativeState = "等待原声音频";
+  let studyBackupPlaying = false;
+  let studyBackupTicket = 0;
 
   chrome.storage.sync.get(DEFAULTS, (saved) => {
     settings = { ...DEFAULTS, ...saved };
+    applyStudyAudioMode();
     queuePrefetch();
   });
 
@@ -44,22 +61,24 @@
     if (changes.enabled) {
       settings.enabled = changes.enabled.newValue !== false;
       if (!settings.enabled) hideOverlay(false);
-      else queuePrefetch();
+      applyStudyAudioMode();
+      if (settings.enabled) queuePrefetch();
     }
     if (changes.accent) {
       settings.accent = changes.accent.newValue === "uk" ? "uk" : "us";
+      studyBackup.key = "";
+      if (studyBackup.word) prepareStudyBackup(studyBackup.word, true);
       prepared = null;
       queuePrefetch();
       if (lastResult && !closedForSession) refreshLastResult();
     }
     if (changes.overlayReopenNonce) {
       settings.overlayReopenNonce = changes.overlayReopenNonce.newValue;
-      closedForSession = false;
-      if (lastResult && settings.enabled) {
-        ensureOverlay();
-        overlayHost.hidden = false;
-        renderResult(lastResult);
-      }
+      if (settings.enabled) openResultPanel();
+    }
+    if (changes.audioTakeoverMode) {
+      settings.audioTakeoverMode = normalizeStudyAudioMode(changes.audioTakeoverMode.newValue);
+      applyStudyAudioMode();
     }
   });
 
@@ -67,6 +86,20 @@
   document.addEventListener("keydown", handleKeydown, true);
   window.addEventListener("resize", handleViewportChange);
   window.visualViewport?.addEventListener("resize", handleViewportChange);
+  if (IS_IDICTATION) {
+    document.addEventListener("ielts-native-audio-event", onNativeStudyAudioEvent);
+    document.addEventListener("ielts-native-audio-cancel-backup", () => {
+      stopStudyBackupPlayback();
+      studyNativeState = "备用未启动，已恢复网站原声";
+      renderStudyAudioControls();
+    });
+    document.addEventListener("ielts-future-audio-queue-ready", consumeFutureWordQueue);
+    // The main-world capture script can run before this document_idle script.
+    window.setTimeout(consumeFutureWordQueue, 0);
+    window.setTimeout(() => {
+      if (!futureCacheQueueKey && location.pathname === "/home") updateFutureCacheDisplay();
+    }, 3500);
+  }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type !== "COLLECT_INTENSIVE_LISTENING_TEXT") return false;
@@ -116,6 +149,8 @@
     const control = findIdictationAnswerControl(event.target);
     if (!control) return;
     const choice = textOf(control);
+    stopStudyBackupPlayback();
+    document.dispatchEvent(new Event("ielts-native-audio-reset"));
     const clue = readIdictationCurrentClue();
     const completedBefore = readIdictationCompletedDetails();
     const pending = {
@@ -124,13 +159,23 @@
       state: inferIdictationChoiceState(choice, clue?.meaning),
       clueKey: idictationClueSignature(clue),
       completedBefore: P.normalizeWord(completedBefore?.word || ""),
+      choiceNode: control,
       startedAt: Date.now()
     };
     window.clearInterval(idictationRevealTimer);
     idictationRevealTimer = window.setInterval(() => {
       const completed = readIdictationCompletedDetails();
       const completedKey = P.normalizeWord(completed?.word || "");
-      if (completed?.word && completedKey && completedKey !== pending.completedBefore) {
+      const clueAfter = idictationClueSignature(readIdictationCurrentClue());
+      const movedToNextQuestion = Boolean(clueAfter && pending.clueKey && clueAfter !== pending.clueKey);
+      const answerChoiceWasReplaced = !pending.choiceNode.isConnected || textOf(pending.choiceNode) !== pending.choice;
+      const repeatedWordCompleted = Boolean(
+        completedKey && completedKey === pending.completedBefore &&
+        (movedToNextQuestion || answerChoiceWasReplaced) &&
+        Date.now() - pending.startedAt >= 150
+      );
+      if (completed?.word && completedKey &&
+        (completedKey !== pending.completedBefore || repeatedWordCompleted)) {
         window.clearInterval(idictationRevealTimer);
         idictationRevealTimer = 0;
         const nextClueKey = idictationClueSignature(readIdictationCurrentClue());
@@ -184,6 +229,8 @@
         : null;
       if (!input || !isLearningMode()) return;
       if (isIdictationSpellingJudged()) {
+        stopStudyBackupPlayback();
+        document.dispatchEvent(new Event("ielts-native-audio-reset"));
         markAsPrevious();
         queuePrefetch();
         return;
@@ -294,6 +341,9 @@
   function primeCurrentWord() {
     if (!settings.enabled || !isLearningMode()) return;
     if (IS_IDICTATION) {
+      if (!futureCacheBadge) updateFutureCacheDisplay();
+      else if (futureCacheBadge.hidden) futureCacheBadge.hidden = false;
+      ensureStudyAudioControls();
       primeIdictationCurrentWord();
       return;
     }
@@ -313,6 +363,8 @@
     const spelling = readIdictationSpellingDetails();
     if (spelling?.word) {
       const signature = `word:${P.normalizeWord(spelling.word)}|${idictationClueSignature(spelling)}`;
+      startNewStudyQuestion(signature);
+      prepareStudyBackup(spelling.word, true);
       if (signature !== idictationClueKey) {
         idictationClueKey = signature;
         idictationResolveRun += 1;
@@ -321,14 +373,21 @@
       return;
     }
     const clue = readIdictationCurrentClue();
-    if (!clue?.ipa) return;
+    if (!clue?.ipa) {
+      startNewStudyQuestion("waiting");
+      return;
+    }
     const clueKey = idictationClueSignature(clue);
-    if (!clueKey || clueKey === idictationClueKey) return;
+    if (!clueKey) return;
+    startNewStudyQuestion("clue:" + clueKey);
+    if (clueKey === idictationClueKey) return;
     idictationClueKey = clueKey;
     const run = ++idictationResolveRun;
     sendMessage({ type: "RESOLVE_CLUE", ipa: clue.ipa, meaning: clue.meaning })
       .then((response) => {
         if (run !== idictationResolveRun || clueKey !== idictationClueKey || !response?.ok || !response.found) return;
+        if (response.audioMatchSafe === true) prepareStudyBackup(response.word, true);
+        else prepareStudyBackup("", false);
         const key = P.normalizeWord(response.word);
         const changed = Boolean(currentWordKey && key && key !== currentWordKey);
         currentWordKey = key;
@@ -524,6 +583,37 @@
         lastResult.typedCandidate = { ok: false, found: false };
         renderResult(lastResult);
       });
+  }
+
+
+  function openResultPanel() {
+    if (!settings.enabled) return;
+    closedForSession = false;
+    const ui = ensureOverlay();
+    overlayHost.hidden = false;
+    if (lastResult) {
+      renderResult(lastResult);
+    } else {
+      // Never reveal a question's answer until it has been judged.
+      ui.previous.hidden = true;
+      ui.status.className = "status protected";
+      ui.status.textContent = "等待完成一题";
+      ui.accent.textContent = settings.accent === "uk" ? "英式发音" : "美式发音";
+      ui.word.textContent = "听写辨音助手";
+      ui.book.textContent = "尚无已判题记录";
+      ui.targetIpa.replaceChildren();
+      ui.playTarget.disabled = true;
+      ui.playTarget.onclick = null;
+      ui.meaning.textContent = "答完一道听写题后，这里会显示正确词、发音和辨音分析。";
+      ui.attempt.textContent = "关闭后，可以点击页面上的「打开单词面板」重新进入。";
+      for (const node of [ui.analysis, ui.plural, ui.deepseek, ui.learning]) {
+        node.hidden = true;
+        node.replaceChildren();
+      }
+      ui.candidateCount.textContent = "待判题";
+      ui.candidates.replaceChildren();
+    }
+    if (IS_IDICTATION) updateFutureCacheDisplay();
   }
 
   function renderResult(result) {
@@ -1028,6 +1118,519 @@
     container.append(rankingList, openFavorites);
   }
 
+  // Prefetch dictionaries for the actual study queue that the website has
+  // already delivered, rather than guessing future questions from similar words.
+  // No upcoming spelling is displayed or sent to the extension UI.
+
+  // Playback takeover is deliberately separate from the dictionary prefetch
+  // count. No unanswered spelling or resolved word is shown in the controls.
+  function normalizeStudyAudioMode(value) {
+    return value === "off" || value === "force" ? value : "auto";
+  }
+
+  function isStudyNativeBridgeReady() {
+    const kind = document.documentElement?.getAttribute("data-ielts-native-audio-bridge") || "";
+    return kind === "html-media-v1" || kind === "html-media+speaker-v2" ||
+      kind === "speaker-only-v2";
+  }
+
+  function hasStudyBackup() {
+    return Boolean(studyBackup.word && (
+      studyBackup.url.startsWith("data:") ||
+      (studyBackup.kind === "tts" && typeof SpeechSynthesisUtterance !== "undefined" &&
+       !!window.speechSynthesis)
+    ));
+  }
+
+  function syncStudyBackupReady() {
+    const root = document.documentElement;
+    if (!root) return;
+    const next = hasStudyBackup() ? "yes" : "no";
+    const previous = root.getAttribute("data-ielts-current-backup-ready");
+    if (previous === next) return;
+    root.setAttribute("data-ielts-current-backup-ready", next);
+    if (next === "yes") document.dispatchEvent(new Event("ielts-native-audio-ready"));
+  }
+
+  function applyStudyAudioMode() {
+    if (!IS_IDICTATION) return;
+    const mode = settings.enabled ? normalizeStudyAudioMode(settings.audioTakeoverMode) : "off";
+    document.documentElement?.setAttribute("data-ielts-audio-takeover-mode", mode);
+    syncStudyBackupReady();
+    document.dispatchEvent(new Event("ielts-native-audio-mode-change"));
+    if (mode === "off") stopStudyBackupPlayback();
+    renderStudyAudioControls();
+  }
+
+  function stopStudyBackupPlayback() {
+    if (studyBackupAudio) {
+      try { studyBackupAudio.pause(); studyBackupAudio.currentTime = 0; } catch {}
+      studyBackupAudio = null;
+    }
+    if (studyBackupVoice) {
+      try { window.speechSynthesis.cancel(); } catch {}
+      studyBackupVoice = null;
+    }
+    studyBackupPlaying = false;
+  }
+
+  function startNewStudyQuestion(signature) {
+    if (!signature || signature === studyQuestionSignature) return;
+    studyQuestionSignature = signature;
+    idictationClueKey = "";
+    stopStudyBackupPlayback();
+    studyBackup = { word: "", key: "", url: "", kind: "none",
+      loading: false, run: studyBackup.run + 1, error: "" };
+    studyNativeState = "等待当前题原声";
+    document.documentElement?.setAttribute("data-ielts-current-backup-ready", "no");
+    document.dispatchEvent(new Event("ielts-native-audio-reset"));
+    renderStudyAudioControls();
+  }
+
+  function prepareStudyBackup(rawWord, trusted) {
+    const word = String(rawWord || "").trim();
+    const key = P.normalizeWord(word) + "|" + settings.accent;
+    if (!trusted || !P.normalizeWord(word)) {
+      // The clue may describe multiple homophones. Never play a guessed word.
+      if (studyBackup.word) {
+        studyBackup = { word: "", key: "", url: "", kind: "none",
+          loading: false, run: studyBackup.run + 1, error: "当前词无法可靠识别，保留原声" };
+        syncStudyBackupReady();
+        renderStudyAudioControls();
+      }
+      return;
+    }
+    if (key === studyBackup.key) return;
+    const canSpeak = typeof SpeechSynthesisUtterance !== "undefined" && !!window.speechSynthesis;
+    const run = studyBackup.run + 1;
+    studyBackup = { word, key, url: "", kind: canSpeak ? "tts" : "none",
+      loading: true, run, error: "" };
+    syncStudyBackupReady();
+    renderStudyAudioControls();
+    // A word already downloaded by the future-queue prefetch returns a data
+    // URL immediately; a remote dictionary URL is NOT counted as cached.
+    sendMessage({ type: "GET_COMPARISON_AUDIO", word, accent: settings.accent })
+      .then((response) => {
+        if (run !== studyBackup.run || key !== studyBackup.key) return;
+        const audioUrl = String(response?.audioUrl || "");
+        const isCached = /^data:(?:audio\/|application\/octet-stream|binary\/octet-stream)/i.test(audioUrl);
+        if (response?.ok && isCached) {
+          studyBackup.url = audioUrl;
+          studyBackup.kind = "cached";
+          studyBackup.error = "";
+        } else {
+          studyBackup.error = canSpeak ? "词典备用音频未缓存，使用设备语音" :
+            "备用音频不可用，继续使用爱听写原声";
+        }
+        studyBackup.loading = false;
+        syncStudyBackupReady();
+        renderStudyAudioControls();
+      })
+      .catch((error) => {
+        if (run !== studyBackup.run) return;
+        studyBackup.loading = false;
+        studyBackup.error = "备用加载失败：" + String(error?.message || error).slice(0, 70);
+        syncStudyBackupReady();
+        renderStudyAudioControls();
+      });
+  }
+
+  function onNativeStudyAudioEvent() {
+    const root = document.documentElement;
+    const raw = root?.getAttribute("data-ielts-native-audio-event");
+    if (!raw) return;
+    root.removeAttribute("data-ielts-native-audio-event");
+    let payload;
+    try { payload = JSON.parse(raw); } catch { return; }
+    if (!payload || !settings.enabled) return;
+    if (payload.type === "takeover") {
+      studyBackupTicket = Number(payload.ticket) || 0;
+      studyNativeState = "正在切换备用发音";
+      playCurrentStudyBackup();
+    } else if (payload.type === "native-playing") {
+      studyNativeState = "爱听写原声正常";
+    } else if (payload.type === "attempt") {
+      studyNativeState = "检测原声音频";
+    } else if (payload.type === "native-error" || payload.type === "waiting" ||
+               payload.type === "backup-timeout") {
+      studyNativeState = String(payload.reason || "原声未正常播放");
+    } else if (payload.type === "bridge-ready") {
+      studyNativeState = "已连接网站播放监听";
+    } else if (payload.type === "speaker-click") {
+      studyNativeState = String(payload.reason || "检测到网站喇叭点击");
+    } else if (payload.type === "native-unobserved") {
+      studyNativeState = String(payload.reason || "请先点击网站原播放键");
+    }
+    renderStudyAudioControls();
+  }
+
+  function reportStudyBackupFailure(reason) {
+    stopStudyBackupPlayback();
+    studyNativeState = "备用发音失败：" + reason;
+    studyBackup.url = "";
+    studyBackup.kind = "none";
+    studyBackup.error = reason;
+    syncStudyBackupReady();
+    document.dispatchEvent(new Event("ielts-native-audio-backup-failed"));
+    renderStudyAudioControls();
+  }
+
+  function signalStudyBackupStarted() {
+    if (!studyBackupTicket) return;
+    document.documentElement?.setAttribute("data-ielts-fallback-started", String(studyBackupTicket));
+  }
+
+  function speakStudyBackup() {
+    if (!studyBackup.word || typeof SpeechSynthesisUtterance === "undefined" ||
+        !window.speechSynthesis) {
+      reportStudyBackupFailure("设备没有可用英语语音");
+      return;
+    }
+    try {
+      const speech = new SpeechSynthesisUtterance(studyBackup.word);
+      speech.lang = settings.accent === "uk" ? "en-GB" : "en-US";
+      speech.rate = 0.9;
+      studyBackupVoice = speech;
+      speech.onstart = () => {
+        if (studyBackupVoice !== speech) return;
+        studyBackupPlaying = true;
+        signalStudyBackupStarted();
+        studyNativeState = "设备语音已接管";
+        renderStudyAudioControls();
+      };
+      speech.onend = () => {
+        if (studyBackupVoice !== speech) return;
+        studyBackupVoice = null;
+        studyBackupPlaying = false;
+        renderStudyAudioControls();
+      };
+      speech.onerror = () => {
+        if (studyBackupVoice !== speech) return;
+        studyBackupVoice = null;
+        reportStudyBackupFailure("设备语音无法播放");
+      };
+      window.speechSynthesis.speak(speech);
+      studyNativeState = "尝试设备英语语音";
+    } catch (error) {
+      reportStudyBackupFailure(String(error?.message || "语音不可用").slice(0, 80));
+    }
+  }
+
+  function playCurrentStudyBackup() {
+    if (!hasStudyBackup()) {
+      reportStudyBackupFailure("当前题没有可靠的备用读音");
+      return;
+    }
+    stopStudyBackupPlayback();
+    if (studyBackup.kind !== "cached" || !studyBackup.url) {
+      speakStudyBackup();
+      return;
+    }
+    try {
+      const audio = new Audio(studyBackup.url);
+      audio.setAttribute("data-ielts-helper-backup", "true");
+      studyBackupAudio = audio;
+      audio.addEventListener("playing", () => {
+        if (studyBackupAudio !== audio) return;
+        studyBackupPlaying = true;
+        signalStudyBackupStarted();
+        studyNativeState = "缓存备用发音已接管";
+        renderStudyAudioControls();
+      });
+      audio.addEventListener("ended", () => {
+        if (studyBackupAudio !== audio) return;
+        studyBackupPlaying = false;
+        studyBackupAudio = null;
+        renderStudyAudioControls();
+      }, { once: true });
+      const attempt = audio.play();
+      if (attempt && typeof attempt.then === "function") {
+        attempt.then(() => {
+          if (studyBackupAudio === audio) signalStudyBackupStarted();
+        }, () => {});
+      }
+      if (attempt && typeof attempt.catch === "function") {
+        attempt.catch(() => {
+          if (studyBackupAudio !== audio) return;
+          studyBackupAudio = null;
+          // A corrupt/blocked cached clip can still fall back to device speech.
+          speakStudyBackup();
+        });
+      }
+    } catch {
+      speakStudyBackup();
+    }
+  }
+
+  function chooseStudyAudioMode(nextMode) {
+    if (!IS_IDICTATION || !settings.enabled) return;
+    const mode = normalizeStudyAudioMode(nextMode);
+    settings.audioTakeoverMode = mode;
+    applyStudyAudioMode();
+    chrome.storage.sync.set({ audioTakeoverMode: mode });
+    // Switching to forced mode is itself a user gesture: give immediate
+    // feedback, then intercept later site speaker clicks automatically.
+    if (mode === "force") requestStudyBackupReplay();
+  }
+
+  function requestStudyBackupReplay() {
+    // This click is a direct user gesture: play cached audio without first
+    // requiring the website's native player to have been detected or started.
+    if (!hasStudyBackup()) {
+      studyNativeState = studyBackup.loading ? "备用音频正在准备，请稍后点播放" : "当前题尚无可播放的缓存";
+      renderStudyAudioControls();
+      return;
+    }
+    document.dispatchEvent(new Event("ielts-native-audio-manual-stop"));
+    studyNativeState = studyBackup.kind === "cached"
+      ? "用户点击，直接播放当前词缓存" : "用户点击，播放设备英语语音";
+    playCurrentStudyBackup();
+    renderStudyAudioControls();
+  }
+
+  function ensureStudyAudioControls() {
+    if (!IS_IDICTATION || location.pathname !== "/home") return;
+    if (!studyTakeoverUi) {
+      const root = document.createElement("div");
+      root.id = "ielts-audio-takeover-controls";
+      root.style.cssText = "position:fixed;top:calc(env(safe-area-inset-top) + 123px);right:8px;z-index:2147483641;width:min(286px,calc(100vw - 16px));padding:8px;border-radius:12px;background:rgba(17,37,52,.94);color:#fff;box-shadow:0 4px 18px #0002;font:11px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;display:flex;flex-direction:column;gap:5px;";
+      const title = document.createElement("div");
+      title.textContent = "🔊 当前听写音频";
+      title.style.cssText = "font-weight:700;";
+      const modes = document.createElement("div");
+      modes.style.cssText = "display:flex;gap:5px;align-items:center;";
+      const buttons = {};
+      for (const [value, label] of [["off","原声"],["auto","自动保底"],["force","接管"]]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        button.dataset.mode = value;
+        button.style.cssText = "flex:1;min-width:0;padding:6px 3px;border:1px solid #476478;border-radius:7px;background:#29445a;color:#fff;font:inherit;cursor:pointer;touch-action:manipulation;";
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          chooseStudyAudioMode(value);
+        });
+        modes.appendChild(button);
+        buttons[value] = button;
+      }
+      const replay = document.createElement("button");
+      replay.type = "button";
+      replay.textContent = "▶ 直接播放当前词缓存";
+      replay.style.cssText = "width:100%;padding:6px 5px;border:1px solid #628d9d;border-radius:7px;background:#315b6f;color:#fff;font:inherit;cursor:pointer;touch-action:manipulation;";
+      replay.addEventListener("click", (event) => {
+        event.stopPropagation();
+        requestStudyBackupReplay();
+      });
+      const status = document.createElement("div");
+      status.setAttribute("role", "status");
+      status.style.cssText = "color:#d5e2e9;font-size:10px;overflow-wrap:anywhere;";
+      root.append(title, modes, replay, status);
+      document.documentElement.appendChild(root);
+      studyTakeoverUi = { root, buttons, replay, status };
+    }
+    renderStudyAudioControls();
+  }
+
+  function renderStudyAudioControls() {
+    // Render the playback button inside the main analysis/cache panel even
+    // when the separate floating controller is not yet mounted.
+    const backupReady = hasStudyBackup();
+    const backupKind = studyBackup.kind;
+    const directLabel = backupKind === "cached"
+      ? "▶ 播放已缓存当前词" : backupKind === "tts"
+        ? "▶ 播放设备英语发音" : "▶ 当前词备用播放";
+    const directHint = !studyBackup.word ? "当前词尚未识别" :
+      backupKind === "cached" ? "音频已下载，可直接试听" :
+      backupKind === "tts" ? "词典缓存未就绪，可使用设备发音" :
+      studyBackup.loading ? "正在准备音频" : "没有备用音频";
+    if (overlayUi?.currentBackupPlay) {
+      overlayUi.currentBackupPlay.disabled = !backupReady;
+      if (overlayUi.currentBackupPlay.textContent !== directLabel)
+        overlayUi.currentBackupPlay.textContent = directLabel;
+      if (overlayUi.currentBackupHint.textContent !== directHint)
+        overlayUi.currentBackupHint.textContent = directHint;
+    }
+    const ui = studyTakeoverUi;
+    if (!ui) return;
+    const visible = settings.enabled && isLearningMode() && location.pathname === "/home";
+    const display = visible ? "flex" : "none";
+    if (ui.root.style.display !== display) ui.root.style.display = display;
+    if (!visible) return;
+    const mode = normalizeStudyAudioMode(settings.audioTakeoverMode);
+    const bridgeReady = isStudyNativeBridgeReady();
+    for (const [name, button] of Object.entries(ui.buttons)) {
+      const selected = mode === name;
+      if (button.dataset.selected !== String(selected)) {
+        button.dataset.selected = String(selected);
+        button.style.color = selected ? "#c8f1ed" : "#fff";
+        button.style.backgroundColor = selected ? "#126b75" : "#29445a";
+        button.setAttribute("aria-pressed", String(selected));
+      }
+      button.disabled = name === "force" && !bridgeReady;
+    }
+    const replayDisabled = !backupReady;
+    if (ui.replay.disabled !== replayDisabled) ui.replay.disabled = replayDisabled;
+    const replayText = backupKind === "cached" ? "▶ 直接播放当前词缓存" :
+      backupKind === "tts" ? "▶ 播放设备英语发音" : "▶ 当前词备用播放";
+    if (ui.replay.textContent !== replayText) ui.replay.textContent = replayText;
+    const backupLabel = !studyBackup.word ? "当前词尚未可靠识别" :
+      studyBackup.kind === "cached" ? "缓存音频已准备" :
+      studyBackup.kind === "tts" ? "设备语音备用" : "备用不可用";
+    const bridgeKind = document.documentElement?.getAttribute("data-ielts-native-audio-bridge") || "";
+    const bridgeLabel = bridgeKind === "html-media+speaker-v2"
+      ? " · 喇叭+音频监听" : bridgeKind === "speaker-only-v2"
+        ? " · 喇叭监听（非HTML播放器）" : bridgeReady
+          ? " · HTML音频监听" : " · 网站喇叭监听未就绪";
+    const label = backupLabel + bridgeLabel + " · " + studyNativeState;
+    if (ui.status.textContent !== label) ui.status.textContent = label;
+    ui.status.title = studyBackup.error || "自动模式在原声缓冲超过约2秒或播放出错时才接管；强制接管对后续题持续有效";
+  }
+
+  function consumeFutureWordQueue() {
+    if (!IS_IDICTATION || location.pathname !== "/home") return;
+    const root = document.documentElement;
+    const raw = root?.getAttribute("data-ielts-future-audio-queue");
+    if (!raw) return;
+    root.removeAttribute("data-ielts-future-audio-queue");
+    let payload;
+    try { payload = JSON.parse(raw); } catch { return; }
+    if (Math.abs(Date.now() - Number(payload?.observedAt || 0)) > 5 * 60 * 1000) return;
+    const words = [...new Set((Array.isArray(payload?.words) ? payload.words : [])
+      .filter((word) => typeof word === "string" && /^[a-z][a-z' -]{0,65}$/i.test(word))
+      .map((word) => P.normalizeWord(word)))].filter(Boolean).slice(0, 50);
+    if (!words.length) return;
+    const key = words.join("|") + "|" + settings.accent;
+    if (key === futureCacheQueueKey) return;
+    futureCacheQueueKey = key;
+    futureCacheWords = words;
+    futureCacheStatuses.clear();
+    futureCacheFailureReasons.clear();
+    futureCacheStorageReasons.clear();
+    const generation = ++futureCacheGeneration;
+    futureCache = { phase: "loading", total: words.length, operationTotal: words.length, done: 0, ready: 0, memory: 0, failed: 0, error: "" };
+    updateFutureCacheDisplay();
+    void prefetchStudyQueueInBatches(words, generation);
+  }
+
+  function retryFailedFutureAudio() {
+    if (futureCache.phase === "loading" || !futureCacheWords.length) return;
+    const failed = futureCacheWords.filter((word) => ["failed", "memory"].includes(futureCacheStatuses.get(word)));
+    if (!failed.length) return;
+    const generation = ++futureCacheGeneration;
+    futureCache.phase = "loading";
+    futureCache.operationTotal = failed.length;
+    futureCache.done = 0;
+    futureCache.error = "";
+    updateFutureCacheDisplay();
+    void prefetchStudyQueueInBatches(failed, generation);
+  }
+
+  function updateFutureCacheCounts() {
+    futureCache.ready = 0;
+    futureCache.memory = 0;
+    futureCache.failed = 0;
+    for (const word of futureCacheWords) {
+      const status = futureCacheStatuses.get(word);
+      if (status === "ready") futureCache.ready++;
+      else if (status === "memory") futureCache.memory++;
+      else if (status === "failed") futureCache.failed++;
+    }
+  }
+
+  async function prefetchStudyQueueInBatches(words, generation) {
+    // Keep messages short so the Orion MV3 worker can return a result before
+    // iOS suspends it. Retry words must not be double-counted.
+    for (let i = 0; i < words.length; i += 4) {
+      if (generation !== futureCacheGeneration || location.pathname !== "/home") return;
+      const batch = words.slice(i, i + 4);
+      try {
+        const response = await sendMessage({ type: "PREFETCH_AUDIO_WORDS", words: batch, accent: settings.accent });
+        if (generation !== futureCacheGeneration) return;
+        if (!response?.ok) throw new Error(response?.error || "扩展后台没有完成音频预加载");
+        const statuses = response.statuses || {};
+        for (const word of batch) {
+          const status = statuses[word] || "failed";
+          futureCacheStatuses.set(word, status);
+          futureCacheFailureReasons.delete(word);
+          futureCacheStorageReasons.delete(word);
+          if (status === "failed") futureCacheFailureReasons.set(word, response.reasons?.[word] || "下载失败（未收到详细原因）");
+          else if (status === "memory") futureCacheStorageReasons.set(word, response.storageReasons?.[word] || "暂时只能存入内存");
+        }
+      } catch (error) {
+        if (generation !== futureCacheGeneration) return;
+        const reason = error instanceof Error ? error.message : String(error);
+        for (const word of batch) {
+          futureCacheStatuses.set(word, "failed");
+          futureCacheStorageReasons.delete(word);
+          futureCacheFailureReasons.set(word, "扩展通信失败：" + reason.slice(0, 80));
+        }
+      }
+      futureCache.done += batch.length;
+      updateFutureCacheCounts();
+      updateFutureCacheDisplay();
+    }
+    if (generation !== futureCacheGeneration) return;
+    futureCache.phase = "done";
+    updateFutureCacheDisplay();
+  }
+
+  function futureCacheLabel() {
+    if (futureCache.phase === "waiting") return "未发现练习后续队列";
+    const { ready, memory, done, total, failed } = futureCache;
+    if (futureCache.phase === "loading") {
+      return "准备 " + done + "/" + (futureCache.operationTotal || total) +
+        " · 已保存 " + ready + " · 临时未存 " + memory + " · 下载失败 " + failed;
+    }
+    return "已保存 " + ready + "/" + total + " · 临时未存 " + memory + " · 下载失败 " + failed;
+  }
+
+  function summarizeCacheReasons(records) {
+    const totals = new Map();
+    for (const reason of records.values()) {
+      const label = String(reason || "原因未知").slice(0, 70);
+      totals.set(label, (totals.get(label) || 0) + 1);
+    }
+    return Array.from(totals, ([reason, count]) => reason + " " + count + " 个").join("；");
+  }
+
+  function updateFutureCacheDisplay() {
+    if (!IS_IDICTATION || location.pathname !== "/home") return;
+    const label = futureCacheLabel();
+    const baseNote = "这是后续单词的词典备用音频，不是爱听写原录音。";
+    const downloadProblems = summarizeCacheReasons(futureCacheFailureReasons);
+    const storageProblems = summarizeCacheReasons(futureCacheStorageReasons);
+    // Do not show the actual upcoming words before answers have been judged.
+    const detail = [
+      baseNote,
+      downloadProblems ? "下载未成功：" + downloadProblems : "",
+      storageProblems ? "已下载但未持久保存：" + storageProblems : "",
+      (futureCache.failed || futureCache.memory) && futureCache.phase !== "loading"
+        ? "可以点击「重试未存项」。" : ""
+    ].filter(Boolean).join(" ");
+    if (overlayUi?.futureCacheStatus) {
+      if (overlayUi.futureCacheStatus.textContent !== label) overlayUi.futureCacheStatus.textContent = label;
+      overlayUi.futureCacheStatus.title = detail;
+      overlayUi.futureCacheDetail.textContent = detail;
+      overlayUi.futureCacheRetry.hidden = futureCache.failed + futureCache.memory === 0;
+      overlayUi.futureCacheRetry.disabled = futureCache.phase === "loading";
+    }
+    if (!futureCacheBadge) {
+      futureCacheBadge = document.createElement("button");
+      futureCacheBadge.type = "button";
+      futureCacheBadge.setAttribute("aria-label", "打开单词辨音面板");
+      futureCacheBadge.style.cssText = "position:fixed;top:calc(env(safe-area-inset-top) + 65px);right:8px;z-index:2147483640;max-width:min(240px,70vw);padding:7px 10px;border:1px solid rgba(255,255,255,.15);border-radius:12px;background:rgba(23,32,51,.94);color:#fff;text-align:left;font:11px/1.55 -apple-system,BlinkMacSystemFont,sans-serif;box-shadow:0 2px 8px #0003;cursor:pointer;touch-action:manipulation;";
+      futureCacheBadge.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openResultPanel();
+      });
+      document.documentElement.appendChild(futureCacheBadge);
+    }
+    futureCacheBadge.hidden = !isLearningMode();
+    const badgeText = "📖 打开单词面板 · " + label;
+    if (futureCacheBadge.textContent !== badgeText) futureCacheBadge.textContent = badgeText;
+    futureCacheBadge.title = detail;
+  }
+
   function renderCandidates(container, countNode, packet, excludedCurrentKey, typedCandidateResponse) {
     container.replaceChildren();
     audioShortcuts.candidates = [];
@@ -1048,6 +1651,7 @@
       ...regularItems.filter((item) => P.normalizeWord(item.word) !== typedKey)
     ].slice(0, 5);
     audioShortcuts.candidates = items.map((item) => ({ url: item.audioUrl, word: item.word }));
+    // Similar-word buttons are on-demand; do not mistake them for future listening questions.
     countNode.textContent = `${items.length}/5`;
     if (!items.length) {
       container.append(element("div", "本题没有符合门槛的近音词或形近词。", "empty"));
@@ -1222,6 +1826,7 @@
     const playNext = () => {
       if (runId !== activeAudioRun || index >= queue.length) return;
       const audio = new Audio(queue[index++]);
+      audio.setAttribute("data-ielts-helper-backup", "true");
       activeAudio = audio;
       let advanced = false;
       let clipTimer = 0;
@@ -1257,6 +1862,7 @@
       return;
     }
     activeAudio = new Audio(url);
+    activeAudio.setAttribute("data-ielts-helper-backup", "true");
     activeAudio.play().catch(() => {
       if (word && !String(word).startsWith("/")) {
         const utterance = new SpeechSynthesisUtterance(word);
@@ -1288,6 +1894,8 @@
         </header>
         <div class="body normal-body">
           <div class="result-line"><span class="status"></span><span class="accent"></span></div>
+          <div class="future-cache-bar"><span>本轮听写备用发音</span><span class="future-cache-status">等待练习队列</span><button class="future-cache-retry" type="button" hidden>重试未存项</button></div><div class="future-cache-detail" role="status">缓存的是词典备用发音，不是爱听写原录音。</div>
+          <div class="current-backup-actions"><button class="current-backup-play" type="button" disabled>▶ 当前词缓存播放</button><span class="current-backup-hint" aria-live="polite">等待当前词备用发音</span></div>
           <section class="target-card">
             <div class="target-top"><div><div class="word-line"><strong class="word"></strong><span class="book"></span></div><div class="ipa target-ipa"></div></div><button class="play-target audio-button" type="button" title="播放完整单词">🔊<kbd class="shortcut-key">·</kbd></button></div>
             <p class="meaning"></p><p class="attempt"></p>
@@ -1300,6 +1908,7 @@
           <section class="plural" hidden></section>
           <section class="deepseek" hidden></section>
           <section class="learning" hidden></section>
+          <footer class="scroll-end">— 已到面板底部 —</footer>
         </div>
       </section>`;
     document.documentElement.appendChild(overlayHost);
@@ -1322,18 +1931,35 @@
       learning: shadow.querySelector(".learning"),
       normalBody: shadow.querySelector(".normal-body"),
       candidates: shadow.querySelector(".candidates"),
-      candidateCount: shadow.querySelector(".candidate-count")
+      candidateCount: shadow.querySelector(".candidate-count"),
+      futureCacheStatus: shadow.querySelector(".future-cache-status"),
+      futureCacheRetry: shadow.querySelector(".future-cache-retry"),
+      futureCacheDetail: shadow.querySelector(".future-cache-detail"),
+      currentBackupPlay: shadow.querySelector(".current-backup-play"),
+      currentBackupHint: shadow.querySelector(".current-backup-hint")
     };
     overlayUi.close.addEventListener("click", () => hideOverlay(true));
+    overlayUi.futureCacheRetry.addEventListener("click", retryFailedFutureAudio);
+    overlayUi.currentBackupPlay.addEventListener("click", (event) => {
+      event.stopPropagation();
+      requestStudyBackupReplay();
+    });
     installDragging(overlayUi.handle);
     installResizing(overlayUi.panel);
     chrome.storage.local.get({ overlayPosition: null, overlaySize: null, overlayMobileHeight: null }, applyOverlayGeometry);
+    if (IS_IDICTATION) {
+      overlayUi.futureCacheStatus.textContent = futureCacheLabel();
+      renderStudyAudioControls();
+    }
     return overlayUi;
   }
 
   function installResizing(panel) {
     if (!("ResizeObserver" in window)) return;
     const observer = new ResizeObserver(() => {
+      // Mobile geometry is saved at pointer-up, not continuously while dragging.
+      // ResizeObserver writes during drag can fight the user's finger on iOS.
+      if (isMobileOverlay()) return;
       window.clearTimeout(resizeSaveTimer);
       resizeSaveTimer = window.setTimeout(() => {
         const rect = panel.getBoundingClientRect();
@@ -1378,23 +2004,30 @@
   }
 
   function resizeMobileSheet(handle, event) {
+    // Pull the header almost all the way to the bottom, or upward to full
+    // screen. Unlike the old 42vh/220px clamp, only the 58px grab bar remains.
     const startY = event.clientY;
     const originHeight = overlayUi.panel.getBoundingClientRect().height;
+    let lastHeight = originHeight;
     try { handle.setPointerCapture(event.pointerId); } catch {}
     const move = (moveEvent) => {
-      const nextHeight = clampMobileHeight(originHeight - (moveEvent.clientY - startY));
-      overlayUi.panel.style.height = `${nextHeight}px`;
+      if (moveEvent.pointerId !== event.pointerId) return;
+      lastHeight = clampMobileHeight(originHeight - (moveEvent.clientY - startY));
+      overlayUi.panel.style.height = `${lastHeight}px`;
+      // Do not move or scroll the page when the grab handle is dragged.
+      if (moveEvent.cancelable) moveEvent.preventDefault();
     };
-    const finish = () => {
+    const finish = (endEvent) => {
+      if (endEvent.pointerId !== event.pointerId) return;
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", finish);
       handle.removeEventListener("pointercancel", finish);
-      const height = Math.round(overlayUi.panel.getBoundingClientRect().height);
-      chrome.storage.local.set({ overlayMobileHeight: height });
+      try { handle.releasePointerCapture(event.pointerId); } catch {}
+      chrome.storage.local.set({ overlayMobileHeight: Math.round(lastHeight) });
     };
     handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", finish, { once: true });
-    handle.addEventListener("pointercancel", finish, { once: true });
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
   }
 
   function handleViewportChange() {
@@ -1447,8 +2080,12 @@
   function clampMobileHeight(value) {
     const viewportHeight = availableViewportHeight();
     const maxHeight = Math.max(1, viewportHeight - 8);
-    const minHeight = Math.min(maxHeight, Math.max(220, Math.round(viewportHeight * 0.42)));
-    return Math.min(maxHeight, Math.max(minHeight, Number(value) || Math.round(viewportHeight * 0.78)));
+    // A collapsed sheet must keep its header/close control accessible.
+    // No arbitrary minimum percentage or fixed 220px threshold.
+    const minHeight = Math.min(maxHeight, 60);
+    const preferred = Number.isFinite(Number(value)) && Number(value) > 0
+      ? Number(value) : Math.round(viewportHeight * 0.78);
+    return Math.min(maxHeight, Math.max(minHeight, preferred));
   }
 
   function clampHostPosition() {
@@ -1706,7 +2343,8 @@
       *{box-sizing:border-box}button{font:inherit}.panel{position:relative;z-index:2;display:flex;flex-direction:column;width:min(520px,calc(100vw - 24px));height:min(720px,calc(100vh - 24px));min-width:min(360px,calc(100vw - 16px));min-height:300px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);resize:both;background:#fff;border:1px solid #e5eaf2;border-radius:18px;box-shadow:0 20px 70px rgba(22,35,58,.25);overflow:hidden}
       .drag-handle{height:52px;padding:0 12px 0 18px;background:linear-gradient(135deg,#ff6b61,#ff4d48);color:#fff;display:flex;align-items:center;justify-content:space-between;cursor:grab;touch-action:none;user-select:none}.drag-handle:active{cursor:grabbing}.drag-handle>div{display:flex;align-items:center;gap:10px}.drag-handle strong{font-size:16px}.previous{font-size:12px;padding:3px 8px;border-radius:99px;background:rgba(255,255,255,.22)}
       .close{width:32px;height:32px;border:0;border-radius:9px;background:rgba(255,255,255,.18);color:#fff;font-size:24px;line-height:1;cursor:pointer}.close:hover{background:rgba(255,255,255,.3)}
-      .body{flex:1;min-height:0;overflow:auto;padding:14px;background:#f6f8fc}.result-line{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}.status,.accent,.candidate-count,.book-badge,.book,.match-badge,.priority-badge{display:inline-flex;align-items:center;border-radius:99px;font-weight:700}.status{font-size:13px;padding:5px 10px}.status.correct{color:#087f5b;background:#dff7ed}.status.incorrect{color:#c92a2a;background:#ffe3e3}.status.protected{color:#5f3dc4;background:#eee9ff}.accent{font-size:12px;color:#57657b;background:#e9eef6;padding:4px 9px}
+      .body{flex:1 1 auto;min-height:0;max-height:100%;overflow-x:hidden;overflow-y:auto;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;padding:14px 14px 48px;background:#f6f8fc}
+      .future-cache-bar{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;background:#edf4fa;color:#31516a;border:1px solid #d4e5f0;border-radius:9px;padding:8px;margin-bottom:9px;font-size:11px}.future-cache-status{font-weight:700}.future-cache-retry{font-size:11px;cursor:pointer;background:#fff;border:1px solid #76abc8;color:#165475;border-radius:7px;padding:5px 9px;touch-action:manipulation}.future-cache-retry:disabled{opacity:.5}.current-backup-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:4px 0 11px}.current-backup-play{background:#166977;color:#fff;border:0;border-radius:9px;padding:8px 12px;font-size:12px;font-weight:700;min-height:36px;touch-action:manipulation;cursor:pointer}.current-backup-play:disabled{opacity:.48;cursor:default}.current-backup-hint{font-size:11px;color:#53647b}.future-cache-detail{font-size:10px;color:#63768b;margin:3px 0 10px;line-height:1.45;overflow-wrap:anywhere}.scroll-end{text-align:center;color:#8390a3;font-size:11px;padding:18px 0 10px}.result-line{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}.status,.accent,.candidate-count,.book-badge,.book,.match-badge,.priority-badge{display:inline-flex;align-items:center;border-radius:99px;font-weight:700}.status{font-size:13px;padding:5px 10px}.status.correct{color:#087f5b;background:#dff7ed}.status.incorrect{color:#c92a2a;background:#ffe3e3}.status.protected{color:#5f3dc4;background:#eee9ff}.accent{font-size:12px;color:#57657b;background:#e9eef6;padding:4px 9px}
       .target-card,.analysis,.plural,.deepseek,.learning,.candidate-card{background:#fff;border:1px solid #e7ebf2;border-radius:14px}.target-card{padding:14px}.target-top,.candidate-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.word-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.word{font-size:28px;line-height:1.15;color:#131b2d}.book{font-size:11px;padding:3px 7px;color:#52627a;background:#edf1f7}.meaning{margin:8px 0 0;font-size:14px;color:#33415c;line-height:1.55}.attempt{margin:8px 0 0;padding-top:8px;border-top:1px dashed #e6eaf0;font-size:12px;color:#68768d}
       .audio-button{min-width:42px;height:34px;flex:0 0 auto;padding:0 6px;border:1px solid #ffd1ce;border-radius:10px;background:#fff2f1;display:inline-flex;align-items:center;justify-content:center;gap:3px;cursor:pointer}.audio-button:hover{background:#ffe2df}.audio-button:disabled{opacity:.45;cursor:not-allowed}.shortcut-key{min-width:15px;height:16px;padding:0 3px;border:1px solid #e4aaa6;border-bottom-width:2px;border-radius:4px;background:#fff;color:#a43a35;font:700 10px/14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-align:center}.ipa{display:flex;align-items:baseline;flex-wrap:wrap;color:#172033;font-family:"Segoe UI",Arial,sans-serif;font-size:27px;line-height:1.3;margin-top:3px}.ipa-token{padding:0 1px;border:0;background:transparent;color:inherit;font:inherit;line-height:inherit;cursor:pointer;border-radius:4px}.ipa-token:hover{background:#fff0ef;color:#ff4f48}.ipa-token.different{color:#e03131;font-weight:900;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px}.ipa.large{font-size:22px;margin:0;flex:1}.target-ipa{font-size:28px}
       .analysis{margin-top:12px;padding:13px}.analysis-heading h3{font-size:15px;margin:0}.analysis-principle{margin:4px 0 0;color:#5f6e83;font-size:11px;line-height:1.5}.spelling-route{display:grid;gap:9px;margin-top:11px}.spelling-step{border:1px solid #e5eaf2;border-radius:11px;background:#fbfcfe;overflow:hidden}.spelling-step-heading{display:flex;align-items:center;gap:7px;padding:7px 9px;background:#f3f6fa;color:#35435a;font-size:11px}.step-number{display:inline-grid;place-items:center;width:19px;height:19px;border-radius:50%;background:#4058a9;color:#fff;font-size:10px;font-weight:900}.spelling-step-body{padding:9px}.route-pronunciation{display:flex;align-items:center;gap:8px}.sound-mapping-list{display:flex;align-items:stretch;gap:6px;flex-wrap:wrap;padding:1px}.sound-mapping{position:relative;display:grid;grid-template-columns:auto auto auto;grid-template-rows:auto auto;align-items:center;justify-content:center;gap:2px 5px;min-width:88px;padding:8px 7px 7px;border:1px solid #cfe8de;border-radius:9px;background:#f4fcf8}.sound-mapping.needs-work{border-color:#ffb8b2;background:#fff6f5}.sound-mapping.confidence-estimated,.sound-mapping.confidence-unmapped,.sound-mapping.confidence-unknown{border-style:dashed;border-color:#e6b15a;background:#fffaf0}.sound-mapping.confidence-silent{border-style:dashed;border-color:#cbd2dd;background:#f8f9fb}.mapping-sound-group{display:flex;min-width:38px;flex-direction:column;align-items:center;justify-content:center;gap:1px}.mapping-sound{padding:2px 4px;border:0;border-radius:5px;background:transparent;color:#3158a6;font-size:15px;font-weight:900;cursor:pointer}.mapping-sound:hover{background:#e7edff}.mapping-sound:disabled{color:#8792a3;cursor:default}.mapping-example{max-width:64px;overflow:hidden;color:#67758b;font-size:9px;font-weight:700;line-height:1.15;text-align:center;text-overflow:ellipsis;white-space:nowrap}.mapping-arrow{color:#8b95a5;font-size:12px}.mapping-correct .alignment-cell{font-size:17px}.mapping-typed{grid-column:1/-1;display:flex;align-items:center;justify-content:center;gap:4px;margin-top:3px;padding-top:4px;border-top:1px dashed rgba(201,42,42,.2)}.mapping-typed>small{color:#9b5050;font-size:8px}.mapping-confidence{grid-column:1/-1;justify-self:center;margin-top:2px;padding:2px 5px;border-radius:99px;background:#fff1cf;color:#936217;font-size:8px;font-weight:800}.mapping-caution{margin:5px 1px 0;color:#805d21;font-size:9px;line-height:1.45}.assembly-line{display:grid;grid-template-columns:54px 1fr;align-items:start;gap:7px}.assembly-line+.assembly-line{margin-top:7px;padding-top:7px;border-top:1px dashed #e1e6ee}.assembly-label{padding-top:3px;color:#728097;font-size:9px}.assembly-chunks{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.assembly-plus,.assembly-equals{color:#909aaa;font-size:11px}.assembly-chunk{min-width:18px;padding:2px 5px;border-radius:5px;background:#e6fcf5;color:#087f5b;font-size:14px;text-align:center}.assembly-chunk.expected{background:#fff3bf;color:#8a5c00}.assembly-chunk.error{background:#fff0f0;color:#c92a2a;text-decoration:line-through}.assembly-word{margin-left:2px;color:#172033;font-size:18px;letter-spacing:.4px}.assembly-line.typed .assembly-word{color:#c92a2a}.route-focus{margin:8px 0 0;padding:7px 8px;border-radius:7px;background:#edf2ff;color:#38508e;font-size:9px;line-height:1.45}.muted{font-size:12px;color:#7b879a}.muted.compact{margin:5px 0}.loading,.empty{padding:18px;text-align:center;color:#7b8799;font-size:13px;background:#fff;border:1px dashed #d9e0eb;border-radius:12px}
@@ -1715,11 +2353,11 @@
       .deepseek{margin-top:12px;padding:12px;background:linear-gradient(180deg,#fff 0%,#fbfcff 100%)}.deepseek-heading,.learning-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}.deepseek-heading>strong,.learning-heading>strong{font-size:13px}.deepseek-badge{padding:3px 7px;border-radius:99px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:800}.deepseek-loading,.deepseek-note,.deepseek-error{margin:9px 0 0;padding:10px;border-radius:9px;font-size:11px;line-height:1.55}.deepseek-loading{color:#59677d;background:#f3f6fa}.deepseek-note{color:#5e6d84;background:#f5f7fb}.deepseek-error{color:#a43a35;background:#fff0ef}.deepseek-part{margin-top:11px}.deepseek-part h3{margin:0 0 7px;font-size:11px;color:#526078}.synonym-list,.expression-list{display:grid;gap:7px}.synonym-item,.expression-item{padding:8px 9px;border:1px solid #e7ebf2;border-radius:9px;background:#fff}.synonym-title,.expression-title{display:flex;align-items:center;justify-content:space-between;gap:8px}.synonym-title strong,.expression-title strong{font-size:12px;color:#23304a}.synonym-title span,.expression-title span{flex:0 0 auto;padding:2px 6px;border-radius:99px;background:#eef2ff;color:#4960ac;font-size:9px}.synonym-item p,.expression-item p{margin:4px 0 0;color:#4b5a72;font-size:10px;line-height:1.5}.synonym-item small,.expression-item small{display:block;margin-top:4px;color:#718096;font-size:9px;line-height:1.5}
       .plural{margin-top:10px;padding:9px 10px;background:linear-gradient(180deg,#fff 0%,#fbfcff 100%)}.plural-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.plural-heading>strong{font-size:12px}.plural-badge{padding:3px 7px;border-radius:99px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:800}.plural-state{display:block;margin-top:7px;padding:7px 8px;border-radius:8px;background:#f3f6fa;color:#59677d;font-size:10px;line-height:1.4}.plural-state.unavailable{color:#6d788b;background:#f7f8fa}.plural-state.error{color:#a43a35;background:#fff0ef}.plural-line{display:flex;align-items:center;gap:6px;margin-top:7px;min-width:0}.plural-label{padding:2px 6px;border-radius:6px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:900}.plural-word{min-width:0;overflow:hidden;color:#243552;font-size:16px;text-overflow:ellipsis;white-space:nowrap}.plural-type{padding:2px 6px;border-radius:99px;background:#e7f6ef;color:#087f5b;font-size:9px;font-weight:800}.plural-type.uncountable,.plural-type.not_noun{background:#f1f3f6;color:#667085}.plural-type.both{background:#fff1cc;color:#9a5b00}.plural-play{display:inline-flex;align-items:center;justify-content:center;gap:3px;width:46px;height:27px;margin-left:auto;border:1px solid #ccd6ee;border-radius:8px;background:#fff;color:#4058a9;cursor:pointer}.plural-play:hover{background:#edf1ff}.plural-play:disabled{cursor:wait;opacity:.55}.plural-ipa{margin-top:2px;font-size:16px;color:#526a9a}.plural-note{display:block;margin-top:4px;color:#2f3b51;font-size:10px;line-height:1.45}.plural-actions{display:flex;justify-content:flex-end;margin-top:6px;padding-top:6px;border-top:1px dashed #e6eaf0}.plural-favorite{height:27px!important}
       .learning{margin-top:12px;padding:12px}.learning-total{font-size:10px;color:#78859a;text-align:right}.sound-ranking-list{display:grid;gap:6px;margin-top:8px}.sound-ranking-item{display:grid;grid-template-columns:22px minmax(105px,.8fr) minmax(0,1.2fr);align-items:center;gap:7px;padding:7px 8px;border-radius:9px;background:#f7f9fd}.ranking-index{display:grid;place-items:center;width:20px;height:20px;border-radius:6px;background:#e9edff;color:#4058a9;font-size:9px;font-weight:900}.ranking-mapping{display:flex;align-items:center;gap:5px}.ranking-sound{padding:2px 5px;border:0;border-radius:5px;background:transparent;color:#2f4b90;font-size:15px;font-weight:900;cursor:pointer}.ranking-sound:hover{background:#e9edff}.ranking-arrow{color:#929daf;font-size:10px}.ranking-grapheme{min-width:22px;padding:2px 5px;border-radius:5px;background:#e6fcf5;color:#087f5b;font-size:14px;text-align:center}.ranking-details{display:grid;justify-items:end;min-width:0}.ranking-count{color:#c17900;font-size:9px}.ranking-details small{max-width:100%;overflow:hidden;color:#7b8799;font-size:8px;text-overflow:ellipsis;white-space:nowrap}.open-sound-favorites{width:100%;height:32px;margin-top:8px;border:1px solid #d8def0;border-radius:8px;background:#fff;color:#4058a9;font-size:10px;font-weight:800;cursor:pointer}.open-sound-favorites:hover{border-color:#aebbea;background:#f1f3ff}
-      .candidate-section{margin-top:10px}.section-title{display:flex;align-items:center;justify-content:space-between;margin:0 2px 7px}.section-title>div{display:flex;flex-direction:column;gap:1px}.section-title strong{font-size:13px}.section-title small{font-size:9px;color:#7a8698}.candidate-count{padding:3px 7px;color:#ff514c;background:#ffe9e7;font-size:10px}.candidates{display:grid;gap:6px}.candidate-card{padding:9px 10px}.candidate-card.typed-candidate{border-color:#8fa1e6;background:linear-gradient(135deg,#f6f8ff,#fff)}.candidate-top{gap:8px}.candidate-identity{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}.candidate-word{font-size:20px;line-height:1.15;color:#172033}.match-badge{font-size:9px;padding:2px 5px;color:#4058a9;background:#e9edff}.priority-badge{font-size:9px;padding:2px 5px;color:#9b5200;background:#fff0c7}.book-badge{font-size:9px;padding:2px 5px;color:#506076;background:#eef2f7}.candidate-controls{display:grid;flex:0 0 52px;gap:4px;width:52px}.candidate-controls .audio-button,.candidate-controls .favorite-button{width:52px;min-width:52px}.candidate-controls .audio-button{height:30px;border-radius:8px}.candidate-ipa{font-size:20px;margin-top:1px}.candidate-meaning{margin:3px 0 0;color:#45536b;font-size:11px;line-height:1.4}.favorite-button{height:27px;padding:0 8px;border:1px solid #ffaaa5;border-radius:8px;background:#fff5f4;color:#d94841;font-size:9px;font-weight:800;white-space:nowrap;cursor:pointer}.favorite-button:hover{background:#ffe7e5}.favorite-button.saved{border-color:#b8decf;background:#e9f8f2;color:#087f5b}.favorite-button:disabled{cursor:default;opacity:.8}.candidate-favorite{padding:0 3px}
+      .candidate-section{margin-top:10px}.section-title{display:flex;align-items:center;justify-content:space-between;margin:0 2px 7px}.section-title>div{display:flex;flex-direction:column;gap:1px}.section-title strong{font-size:13px}.section-title small{font-size:9px;color:#7a8698}.candidate-count{padding:3px 7px;color:#ff514c;background:#ffe9e7;font-size:10px}.candidates{display:grid;gap:6px}.candidate-card{padding:9px 10px}.candidate-card.typed-candidate{border-color:#8fa1e6;background:linear-gradient(135deg,#f6f8ff,#fff)}.candidate-top{gap:8px}.candidate-identity{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}.audio-cache-dot{display:inline-block;flex:none;width:8px;height:8px;border-radius:50%;background:#9ca3af;box-shadow:0 0 0 2px #fff}.audio-cache-dot[data-state="loading"]{background:#d4a23b}.audio-cache-dot[data-state="ready"]{background:#168a9a}.audio-cache-dot[data-state="failed"]{background:#d34f4f}.audio-cache-summary{font-size:10px}.candidate-word{font-size:20px;line-height:1.15;color:#172033}.match-badge{font-size:9px;padding:2px 5px;color:#4058a9;background:#e9edff}.priority-badge{font-size:9px;padding:2px 5px;color:#9b5200;background:#fff0c7}.book-badge{font-size:9px;padding:2px 5px;color:#506076;background:#eef2f7}.candidate-controls{display:grid;flex:0 0 52px;gap:4px;width:52px}.candidate-controls .audio-button,.candidate-controls .favorite-button{width:52px;min-width:52px}.candidate-controls .audio-button{height:30px;border-radius:8px}.candidate-ipa{font-size:20px;margin-top:1px}.candidate-meaning{margin:3px 0 0;color:#45536b;font-size:11px;line-height:1.4}.favorite-button{height:27px;padding:0 8px;border:1px solid #ffaaa5;border-radius:8px;background:#fff5f4;color:#d94841;font-size:9px;font-weight:800;white-space:nowrap;cursor:pointer}.favorite-button:hover{background:#ffe7e5}.favorite-button.saved{border-color:#b8decf;background:#e9f8f2;color:#087f5b}.favorite-button:disabled{cursor:default;opacity:.8}.candidate-favorite{padding:0 3px}
       @media(max-width:820px){
-        .panel{width:100vw;min-width:100vw;height:min(78dvh,720px);min-height:min(340px,42dvh);max-width:100vw;max-height:calc(100dvh - 8px);resize:none;border-width:1px 0 0;border-radius:20px 20px 0 0;box-shadow:0 -14px 50px rgba(22,35,58,.24)}
-        .drag-handle{position:relative;height:58px;padding:8px 8px 0 16px;cursor:ns-resize}.drag-handle::before{content:"";position:absolute;top:6px;left:50%;width:38px;height:4px;border-radius:99px;background:rgba(255,255,255,.58);transform:translateX(-50%)}.drag-handle strong{font-size:15px}.previous{font-size:11px}.close{width:44px;height:44px;border-radius:12px;font-size:27px;touch-action:manipulation}
-        .body{padding:10px 10px max(14px,env(safe-area-inset-bottom));overscroll-behavior:contain;-webkit-overflow-scrolling:touch}.result-line{margin-bottom:8px}.status{font-size:12px;padding:5px 8px}.accent{font-size:11px}
+        .panel{width:100vw;min-width:100vw;height:min(78dvh,720px);min-height:60px;max-width:100vw;max-height:calc(100dvh - 8px);resize:none;border-width:1px 0 0;border-radius:20px 20px 0 0;box-shadow:0 -14px 50px rgba(22,35,58,.24)}
+        .drag-handle{position:relative;flex:0 0 58px;height:58px;padding:8px 8px 0 16px;cursor:ns-resize;touch-action:none}.drag-handle::before{content:"";position:absolute;top:6px;left:50%;width:38px;height:4px;border-radius:99px;background:rgba(255,255,255,.58);transform:translateX(-50%)}.drag-handle strong{font-size:15px}.previous{font-size:11px}.close{width:44px;height:44px;border-radius:12px;font-size:27px;touch-action:manipulation}
+        .body{padding:10px 10px max(54px,env(safe-area-inset-bottom));min-height:0;overflow-y:scroll;touch-action:pan-y;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch}.result-line{margin-bottom:8px}.status{font-size:12px;padding:5px 8px}.accent{font-size:11px}
         .target-card{padding:12px}.word{font-size:24px}.target-ipa{font-size:23px}.meaning{font-size:13px}.audio-button{min-width:44px;height:44px;touch-action:manipulation}.shortcut-key{display:none}
         .analysis{padding:11px}.sound-mapping-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch}.sound-mapping{width:100%;min-width:0;min-height:64px}.mapping-sound{min-height:32px}.mapping-example{font-size:10px}
         .candidate-card{padding:10px}.candidate-word{font-size:19px}.candidate-ipa{font-size:19px}.candidate-meaning{font-size:11px}.candidate-controls{flex-basis:56px;width:56px}.candidate-controls .audio-button,.candidate-controls .favorite-button{width:56px;min-width:56px}.candidate-controls .audio-button{height:42px}.favorite-button{height:36px;touch-action:manipulation}

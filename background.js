@@ -648,10 +648,32 @@ async function fetchAudio(item, accent) {
   if (!P.normalizeWord(item.word)) return "";
   if (audioCache.has(key)) return audioCache.get(key);
   const remoteUrl = fallbackAudioUrl(item, accent);
-  const response = await fetch(remoteUrl, { cache: "force-cache", signal: AbortSignal.timeout(6500) });
-  if (!response.ok) throw new Error(`音频服务返回 ${response.status}`);
-  const blob = await response.blob();
-  if (!blob.size) throw new Error("音频为空");
+  // CacheStorage survives MV3 service-worker suspension, unlike the in-memory Map.
+  // Do not serve a failed/empty network response as cached audio.
+  let blob = null;
+  let store = null;
+  try {
+    store = await caches.open("ielts-word-audio-v1");
+    const cached = await store.match(remoteUrl);
+    if (cached?.ok) blob = await cached.blob();
+  } catch {
+    // CacheStorage may be unavailable in some iOS extension runtimes.
+  }
+  if (!blob?.size) {
+    const response = await fetch(remoteUrl, { cache: "force-cache", signal: AbortSignal.timeout(6500) });
+    if (!response.ok) throw new Error(`音频服务返回 ${response.status}`);
+    blob = await response.blob();
+    if (!blob.size) throw new Error("音频为空");
+    if (store) {
+      try {
+        await store.put(remoteUrl, new Response(blob, {
+          headers: { "Content-Type": blob.type || "audio/mpeg" }
+        }));
+      } catch {
+        // Continue with memory caching when persistent storage is unavailable.
+      }
+    }
+  }
   const dataUrl = await blobToDataUrl(blob);
   audioCache.set(key, dataUrl);
   while (audioCache.size > MAX_AUDIO_CACHE) audioCache.delete(audioCache.keys().next().value);

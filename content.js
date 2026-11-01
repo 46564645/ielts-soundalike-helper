@@ -6,7 +6,7 @@
   const COMPARISONS_KEY = "pronunciationComparisonsV1";
   const SOUND_FAVORITES_KEY = "soundSpellingFavoritesV1";
   const PHONEME_CLIP_MS = 1000;
-  const DEFAULTS = { enabled: true, accent: "us", overlayReopenNonce: 0 };
+  const DEFAULTS = { enabled: true, accent: "us", overlayReopenNonce: 0, audioTakeoverMode: "auto" };
   let settings = { ...DEFAULTS };
   let prepared = null;
   let currentWordKey = "";
@@ -33,9 +33,17 @@
   const futureCacheStatuses = new Map();
   const futureCacheFailureReasons = new Map();
   const futureCacheStorageReasons = new Map();
+  let studyTakeoverUi = null;
+  let studyBackup = { word: "", key: "", url: "", kind: "none", loading: false, run: 0, error: "" };
+  let studyQuestionSignature = "";
+  let studyBackupAudio = null;
+  let studyBackupVoice = null;
+  let studyNativeState = "等待原声音频";
+  let studyBackupPlaying = false;
 
   chrome.storage.sync.get(DEFAULTS, (saved) => {
     settings = { ...DEFAULTS, ...saved };
+    applyStudyAudioMode();
     queuePrefetch();
   });
 
@@ -56,6 +64,8 @@
     }
     if (changes.accent) {
       settings.accent = changes.accent.newValue === "uk" ? "uk" : "us";
+      studyBackup.key = "";
+      if (studyBackup.word) prepareStudyBackup(studyBackup.word, true);
       prepared = null;
       queuePrefetch();
       if (lastResult && !closedForSession) refreshLastResult();
@@ -64,6 +74,10 @@
       settings.overlayReopenNonce = changes.overlayReopenNonce.newValue;
       if (settings.enabled) openResultPanel();
     }
+    if (changes.audioTakeoverMode) {
+      settings.audioTakeoverMode = normalizeStudyAudioMode(changes.audioTakeoverMode.newValue);
+      applyStudyAudioMode();
+    }
   });
 
   document.addEventListener("click", handlePageClick, true);
@@ -71,6 +85,7 @@
   window.addEventListener("resize", handleViewportChange);
   window.visualViewport?.addEventListener("resize", handleViewportChange);
   if (IS_IDICTATION) {
+    document.addEventListener("ielts-native-audio-event", onNativeStudyAudioEvent);
     document.addEventListener("ielts-future-audio-queue-ready", consumeFutureWordQueue);
     // The main-world capture script can run before this document_idle script.
     window.setTimeout(consumeFutureWordQueue, 0);
@@ -317,6 +332,7 @@
     if (IS_IDICTATION) {
       if (!futureCacheBadge) updateFutureCacheDisplay();
       else if (futureCacheBadge.hidden) futureCacheBadge.hidden = false;
+      ensureStudyAudioControls();
       primeIdictationCurrentWord();
       return;
     }

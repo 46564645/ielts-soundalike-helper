@@ -103,10 +103,12 @@
   // world can see native play()/playing/error events; the isolated extension
   // script cannot reliably intercept those calls on iOS.
   function installAudioTakeoverBridge() {
-    if (location.hostname !== "www.idictation.cn" ||
-        typeof HTMLMediaElement === "undefined" ||
-        typeof HTMLMediaElement.prototype.play !== "function") return;
-    const nativePlay = HTMLMediaElement.prototype.play;
+    if (location.hostname !== "www.idictation.cn") return;
+    // Site versions may use Web Audio instead of HTMLMediaElement.
+    // The speaker click listener must still be available in that case.
+    const nativePlay = typeof HTMLMediaElement !== "undefined" &&
+      typeof HTMLMediaElement.prototype.play === "function"
+        ? HTMLMediaElement.prototype.play : null;
     const tracked = new WeakSet();
     let activeAudio = null;
     let attemptId = 0;
@@ -164,7 +166,7 @@
         document.dispatchEvent(new Event("ielts-native-audio-cancel-backup"));
         emit("backup-timeout", "备用发音没有成功启动，已尝试恢复原声");
         const native = activeAudio;
-        if (native) {
+        if (native && nativePlay) {
           try { Promise.resolve(nativePlay.call(native)).catch(() => {}); } catch {}
         }
       }, 3000);
@@ -214,7 +216,7 @@
       });
     }
 
-    HTMLMediaElement.prototype.play = function (...args) {
+    if (nativePlay) HTMLMediaElement.prototype.play = function (...args) {
       if (!studyAudio(this) || mode() === "off") return nativePlay.apply(this, args);
       listen(this);
       activeAudio = this;
@@ -254,6 +256,61 @@
       scheduleWatchdog(this, id);
       return result;
     };
+
+
+    // Native listener for the original website's speaker icon. React normally
+    // attaches delegated click handlers below document; capture runs first.
+    // Do not block unrelated buttons or reveal the current word.
+    function findSiteSpeakerControl(target) {
+      if (!target || typeof target.closest !== "function") return null;
+      const icon = target.closest("svg,i,[class*='volume'],[class*='speaker'],[class*='sound']");
+      const control = target.closest("button,[role='button']") ||
+        icon?.closest?.("button,[role='button']") || null;
+      if (!control || !control.closest("main")) return null;
+      const label = [
+        control.getAttribute("aria-label"), control.getAttribute("title"),
+        control.getAttribute("data-testid"), control.getAttribute("data-state")
+      ].filter(Boolean).join(" ").toLowerCase();
+      const speakerIcon = control.querySelector(
+        "svg[class*='volume'],svg[class*='speaker'],svg[class*='audio']," +
+        "svg[class*='sound'],svg[class*='headphone'],i[class*='volume']," +
+        "[data-lucide*='volume'],[data-icon*='volume']"
+      );
+      const named = /(播放|发音|朗读|重播|重听|喇叭|读音|音频|声音|listen|audio|sound|speaker|volume|pronounc)/i.test(label);
+      if (!named && !speakerIcon && !(
+        icon && /(volume|speaker|sound|audio|headphone)/i.test(String(icon.getAttribute("class") || ""))
+      )) return null;
+      if (/(下一题|上一题|提交|答案|选择|认识|不认识|隐藏|设置)/.test(label)) return null;
+      return control;
+    }
+    document.addEventListener("click", (event) => {
+      if (location.pathname !== "/home" || !findSiteSpeakerControl(event.target)) return;
+      const currentMode = mode();
+      const hasBackup = ready();
+      if (currentMode === "force" && hasBackup ||
+          currentMode === "auto" && hasBackup &&
+            typeof navigator !== "undefined" && navigator.onLine === false) {
+        // Block the site click before React can play another audio stream.
+        if (event.cancelable) event.preventDefault();
+        event.stopImmediatePropagation();
+        event.stopPropagation();
+        activateFallback(currentMode === "force"
+          ? "网站喇叭已拦截，播放备用发音" : "离线模式，播放备用发音");
+        return;
+      }
+      emit("speaker-click", hasBackup
+        ? "检测到网站喇叭；正常模式继续由原声播放"
+        : "检测到网站喇叭；当前题备用发音尚未准备");
+    }, true);
+
+    document.addEventListener("ielts-native-audio-manual-stop", () => {
+      // Direct UI playback is a user gesture. Pause any observed native
+      // HTML audio first, but cannot guarantee control of unobserved Web Audio.
+      if (activeAudio) {
+        try { activeAudio.pause(); } catch {}
+        clearWatchdog();
+      }
+    });
 
     document.addEventListener("ielts-native-audio-reset", () => {
       attemptId++;
@@ -296,7 +353,7 @@
       clearWatchdog();
       // A backup that fails must never prevent the user using the site.
       const native = activeAudio;
-      if (native && !nativePlaying) {
+      if (native && nativePlay && !nativePlaying) {
         try { Promise.resolve(nativePlay.call(native)).catch(() => {}); } catch {}
       }
     });
@@ -304,7 +361,8 @@
     function announceReady() {
       const el = root();
       if (!el) return;
-      el.setAttribute("data-ielts-native-audio-bridge", "html-media-v1");
+      el.setAttribute("data-ielts-native-audio-bridge",
+        nativePlay ? "html-media+speaker-v2" : "speaker-only-v2");
       emit("bridge-ready");
     }
     announceReady();

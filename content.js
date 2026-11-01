@@ -40,6 +40,7 @@
   let studyBackupVoice = null;
   let studyNativeState = "等待原声音频";
   let studyBackupPlaying = false;
+  let studyBackupTicket = 0;
 
   chrome.storage.sync.get(DEFAULTS, (saved) => {
     settings = { ...DEFAULTS, ...saved };
@@ -87,6 +88,11 @@
   window.visualViewport?.addEventListener("resize", handleViewportChange);
   if (IS_IDICTATION) {
     document.addEventListener("ielts-native-audio-event", onNativeStudyAudioEvent);
+    document.addEventListener("ielts-native-audio-cancel-backup", () => {
+      stopStudyBackupPlayback();
+      studyNativeState = "备用未启动，已恢复网站原声";
+      renderStudyAudioControls();
+    });
     document.addEventListener("ielts-future-audio-queue-ready", consumeFutureWordQueue);
     // The main-world capture script can run before this document_idle script.
     window.setTimeout(consumeFutureWordQueue, 0);
@@ -1236,13 +1242,15 @@
     try { payload = JSON.parse(raw); } catch { return; }
     if (!payload || !settings.enabled) return;
     if (payload.type === "takeover") {
+      studyBackupTicket = Number(payload.ticket) || 0;
       studyNativeState = "正在切换备用发音";
       playCurrentStudyBackup();
     } else if (payload.type === "native-playing") {
       studyNativeState = "爱听写原声正常";
     } else if (payload.type === "attempt") {
       studyNativeState = "检测原声音频";
-    } else if (payload.type === "native-error" || payload.type === "waiting") {
+    } else if (payload.type === "native-error" || payload.type === "waiting" ||
+               payload.type === "backup-timeout") {
       studyNativeState = String(payload.reason || "原声未正常播放");
     } else if (payload.type === "bridge-ready") {
       studyNativeState = "已连接 HTML 音频监听";
@@ -1263,6 +1271,11 @@
     renderStudyAudioControls();
   }
 
+  function signalStudyBackupStarted() {
+    if (!studyBackupTicket) return;
+    document.documentElement?.setAttribute("data-ielts-fallback-started", String(studyBackupTicket));
+  }
+
   function speakStudyBackup() {
     if (!studyBackup.word || typeof SpeechSynthesisUtterance === "undefined" ||
         !window.speechSynthesis) {
@@ -1277,6 +1290,7 @@
       speech.onstart = () => {
         if (studyBackupVoice !== speech) return;
         studyBackupPlaying = true;
+        signalStudyBackupStarted();
         studyNativeState = "设备语音已接管";
         renderStudyAudioControls();
       };
@@ -1315,6 +1329,7 @@
       audio.addEventListener("playing", () => {
         if (studyBackupAudio !== audio) return;
         studyBackupPlaying = true;
+        signalStudyBackupStarted();
         studyNativeState = "缓存备用发音已接管";
         renderStudyAudioControls();
       });
@@ -1325,6 +1340,11 @@
         renderStudyAudioControls();
       }, { once: true });
       const attempt = audio.play();
+      if (attempt && typeof attempt.then === "function") {
+        attempt.then(() => {
+          if (studyBackupAudio === audio) signalStudyBackupStarted();
+        }, () => {});
+      }
       if (attempt && typeof attempt.catch === "function") {
         attempt.catch(() => {
           if (studyBackupAudio !== audio) return;

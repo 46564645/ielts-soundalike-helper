@@ -35,6 +35,12 @@ function harness(shared) {
             cb(result);
           },
           set(values, cb) {
+            if (shared.storageFail) {
+              context.chrome.runtime.lastError = { message: "QUOTA_BYTES exceeded" };
+              cb();
+              context.chrome.runtime.lastError = null;
+              return;
+            }
             for (const [key, value] of Object.entries(values)) shared.storage.set(key, value);
             cb();
           },
@@ -94,6 +100,24 @@ function harness(shared) {
   shared.networkDown = false;
   const recovered = await first.send("PREFETCH_AUDIO_WORDS", ["unavailable"]);
   assert.equal(recovered.statuses.unavailable, "ready", "manual retry must recover without reinstalling");
+
+  // A downloaded but unsaved audio file must not be counted as a network
+  // failure. Once storage works, the same audio is persisted without a reload.
+  const storageProblem = { storage: new Map(), downloadCount: 0, storageFail: true };
+  const storageWorker = harness(storageProblem);
+  const unsaved = await storageWorker.send("PREFETCH_AUDIO_WORDS", ["storageword"]);
+  assert.equal(unsaved.count, 0);
+  assert.equal(unsaved.memoryCount, 1);
+  assert.equal(unsaved.statuses.storageword, "memory");
+  assert.match(unsaved.storageReasons.storageword, /本地存储空间不足/);
+  assert.equal(unsaved.failures["本地存储空间不足"], undefined,
+    "local save problem is not a download failure");
+  storageProblem.storageFail = false;
+  const savedRetry = await storageWorker.send("PREFETCH_AUDIO_WORDS", ["storageword"]);
+  assert.equal(savedRetry.count, 1);
+  assert.equal(savedRetry.statuses.storageword, "ready");
+  assert.equal(storageProblem.downloadCount, 1,
+    "retry of local storage must reuse already downloaded audio");
 
   console.log("Audio retry cache and persistence tests passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

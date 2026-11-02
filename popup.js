@@ -22,7 +22,10 @@ const speakingEntryStatus = document.querySelector("#speaking-entry-status");
 let savedTimer = 0;
 let hasDeepseekKey = false;
 
-chrome.storage.sync.get(DEFAULTS, (settings) => {
+const SETTINGS_AREA = chrome.storage?.sync?.get ? "sync" : "local";
+const settingsStorage = chrome.storage[SETTINGS_AREA];
+
+settingsStorage.get(DEFAULTS, (settings) => {
   enabled.checked = settings.enabled !== false;
   const selected = accents.find((input) => input.value === settings.accent) || accents[0];
   selected.checked = true;
@@ -75,13 +78,13 @@ clearDeepseek.addEventListener("click", () => {
   });
 });
 reopen.addEventListener("click", () => {
-  chrome.storage.sync.set({ overlayReopenNonce: Date.now() }, () => showSaved("已请求重新显示"));
+  settingsStorage.set({ overlayReopenNonce: Date.now() }, () => showSaved("已请求重新显示"));
 });
 extractSpeaking.addEventListener("click", extractSpeakingMaterial);
 
 function persist() {
   const accent = accents.find((input) => input.checked)?.value === "uk" ? "uk" : "us";
-  chrome.storage.sync.set({ enabled: enabled.checked, accent }, () => showSaved("设置已保存"));
+  settingsStorage.set({ enabled: enabled.checked, accent }, () => showSaved("设置已保存"));
 }
 
 function updateDeepseekStatus() {

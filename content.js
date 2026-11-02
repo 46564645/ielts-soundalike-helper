@@ -2,6 +2,8 @@
   "use strict";
 
   const P = globalThis.IeltsPhonetics;
+  const SETTINGS_AREA = chrome.storage?.sync?.get ? "sync" : "local";
+  const settingsStorage = chrome.storage[SETTINGS_AREA];
   const IS_IDICTATION = location.hostname === "www.idictation.cn";
   const COMPARISONS_KEY = "pronunciationComparisonsV1";
   const SOUND_FAVORITES_KEY = "soundSpellingFavoritesV1";
@@ -27,13 +29,13 @@
   let idictationSpellingTimer = 0;
   let studyQuestionSignature = "";
 
-  chrome.storage.sync.get(DEFAULTS, (saved) => {
+  settingsStorage.get(DEFAULTS, (saved) => {
     settings = { ...DEFAULTS, ...saved };
     globalThis.IeltsStudySession?.setAccent(settings.accent);
     queuePrefetch();
   });
 
-  chrome.storage.onChanged.addListener((changes, area) => {
+  chrome.storage.onChanged?.addListener((changes, area) => {
     if (area === "local" && changes[SOUND_FAVORITES_KEY] && lastResult && !closedForSession) {
       sendMessage({ type: "GET_LEARNING_STATE" }).then((learning) => {
         if (!learning?.ok || !lastResult || closedForSession) return;
@@ -42,7 +44,7 @@
         renderResult(lastResult);
       }).catch(() => {});
     }
-    if (area !== "sync") return;
+    if (area !== SETTINGS_AREA) return;
     if (changes.enabled) {
       settings.enabled = changes.enabled.newValue !== false;
       if (!settings.enabled) hideOverlay(false);

@@ -11,7 +11,7 @@
   const POSITION_KEY = "studySpeakerPositionV1";
   const catalog = new Map();
   let queue = { occurrences: [], currentIndex: 0, source: "" };
-  let session = { active: false, starting: false, id: "", coverageEnd: 0, generation: 0 };
+  let session = { active: false, starting: false, id: "", coverageEnd: 0, generation: 0, direct: false };
   let accent = "us";
   let currentWord = "";
   let currentAudio = null;
@@ -83,16 +83,16 @@
     try {
       const response = await sendMessage({ type: "START_STUDY_AUDIO_SESSION" });
       if (!response?.ok || !response.sessionId) throw new Error(response?.error || "无法创建缓存会话");
-      session = { active: true, starting: false, id: response.sessionId, coverageEnd: 0, generation: 0 };
-      ensureSpeaker();
-      speaker.hidden = false;
-      scheduleWindow();
-      prepareCurrentAudio();
+      session = { active: true, starting: false, id: response.sessionId, coverageEnd: 0, generation: 0, direct: false };
     } catch {
-      session.starting = false;
-      cacheStatus.phase = "failed";
-      renderSpeaker();
+      // Orion/iOS may run without a usable background worker or tab context.
+      // Keep the speaker working by playing the site's own audio URLs.
+      session = { active: true, starting: false, id: "", coverageEnd: 0, generation: 0, direct: true };
     }
+    ensureSpeaker();
+    speaker.hidden = false;
+    scheduleWindow();
+    prepareCurrentAudio();
   }
 
   function setAccent(value) {
@@ -120,7 +120,7 @@
   }
 
   function scheduleWindow() {
-    if (!session.active || !session.id || !queue.occurrences.length) {
+    if (!session.active || (!session.id && !session.direct) || !queue.occurrences.length) {
       cacheStatus = { phase: "waiting", ready: 0, total: 0, failed: 0 };
       renderSpeaker();
       return;
@@ -140,6 +140,12 @@
     const items = Array.from(unique.values());
     if (!items.length) {
       cacheStatus = { phase: "waiting", ready: 0, total: covered.length, failed: 0 };
+      renderSpeaker();
+      return;
+    }
+    if (session.direct) {
+      cacheStatus = { phase: "ready", ready: items.length, total: items.length, failed: 0 };
+      prepareCurrentAudio();
       renderSpeaker();
       return;
     }
@@ -170,24 +176,57 @@
   }
 
   function prepareCurrentAudio() {
-    if (!session.active || !session.id || !currentWord) return;
+    if (!session.active || !currentWord) return;
+    if (session.direct || !session.id) {
+      applyDirectAudio();
+      return;
+    }
     const load = ++currentLoad;
-    sendMessage({ type: "GET_STUDY_SESSION_AUDIO", sessionId: session.id, word: currentWord, accent })
+    const word = currentWord;
+    sendMessage({ type: "GET_STUDY_SESSION_AUDIO", sessionId: session.id, word, accent })
       .then((response) => {
-        if (load !== currentLoad || currentWord !== normalizeWord(response?.word || currentWord)) return;
+        if (load !== currentLoad || word !== currentWord) return;
         const url = String(response?.audioUrl || "");
-        if (!response?.ok || !response.available || !/^data:(?:audio\/|application\/octet-stream|binary\/octet-stream)/i.test(url)) {
-          currentAudioUrl = "";
-          currentAudio = null;
-          renderSpeaker();
+        if (!response?.ok || !response.available || !isAudioDataUrl(url)) {
+          applyDirectAudio();
           return;
         }
-        currentAudioUrl = url;
-        currentAudio = new Audio(url);
-        currentAudio.preload = "auto";
-        currentAudio.setAttribute("data-ielts-helper-manual", "true");
-        renderSpeaker();
-      }).catch(() => {});
+        setCurrentAudio(url);
+      }).catch(() => {
+        if (load === currentLoad) applyDirectAudio();
+      });
+  }
+
+  function isAudioDataUrl(url) {
+    return /^data:(?:audio\/|application\/octet-stream|binary\/octet-stream)/i.test(url);
+  }
+
+  function directAudioUrl(word) {
+    const item = catalog.get(normalizeWord(word));
+    return accent === "uk" ? String(item?.ukAudio || "") : String(item?.usAudio || "");
+  }
+
+  function applyDirectAudio() {
+    const url = directAudioUrl(currentWord);
+    if (!url) {
+      currentAudioUrl = "";
+      currentAudio = null;
+      renderSpeaker();
+      return;
+    }
+    setCurrentAudio(url);
+  }
+
+  function setCurrentAudio(url) {
+    if (url === currentAudioUrl && currentAudio) {
+      renderSpeaker();
+      return;
+    }
+    currentAudioUrl = url;
+    currentAudio = new Audio(url);
+    currentAudio.preload = "auto";
+    currentAudio.setAttribute("data-ielts-helper-manual", "true");
+    renderSpeaker();
   }
 
   function ensureSpeaker() {

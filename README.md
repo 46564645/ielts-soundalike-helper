@@ -1,9 +1,16 @@
-# 听写辨音助手 v2.11.0
+# 听写辨音助手 v2.11.1
 
 这是为以下雅思听写页面定制的 Chrome / Edge 扩展：
 
 - `https://ielts.itongzhuo.com/business/ielts/student/jumpAnswerWordDictation.do`
 - `https://www.idictation.cn/home`
+
+## v2.11.1 Orion 手机浏览器适配
+
+- 新增 Orion 专用清单与打包脚本，不使用 Chromium 专属的 `world: "MAIN"`，改由 `safari-page-loader.js` 注入页面音频监听。
+- 后台不可用（Orion iOS 没有 Service Worker 或 `sender.tab`）时，小喇叭自动改用网页原始音频地址直连播放；会话缓存降级，但发音不受影响。
+- 缺少 `storage.sync` 时设置自动回退到本地存储；缺少 `tabs` API 时收藏页入口给出明确提示，不再抛出异常。
+- 构建、安装与降级说明见 [`ORION_IOS.md`](ORION_IOS.md)。
 
 ## v2.11.0 手机会话缓存与手动喇叭
 

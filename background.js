@@ -111,6 +111,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === "OPEN_SOUND_SPELLING_FAVORITES") {
+    if (!chrome.tabs?.create) {
+      sendResponse({ ok: false, error: "当前浏览器不支持打开扩展标签页" });
+      return true;
+    }
     chrome.tabs.create({ url: chrome.runtime.getURL("sound-favorites.html") }, () => {
       sendResponse(chrome.runtime.lastError
         ? { ok: false, error: chrome.runtime.lastError.message }
@@ -150,18 +154,19 @@ if (chrome.tabs?.onRemoved) {
 if (chrome.tabs?.query) void reconcileStudyAudioSessions();
 
 async function startStudyAudioSession(sender) {
+  // Orion iOS may omit sender.tab; keep the session usable and expire it by age.
   const tabId = Number(sender?.tab?.id);
-  if (!Number.isInteger(tabId)) throw new Error("无法识别当前练习标签页");
-  const sessionId = `tab-${tabId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const owner = Number.isInteger(tabId) ? tabId : "unknown";
+  const sessionId = `tab-${owner}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   await updateStudySessionRegistry((registry) => {
-    registry[sessionId] = { tabId, createdAt: Date.now(), touchedAt: Date.now(), keys: [] };
+    registry[sessionId] = { tabId: owner === "unknown" ? null : owner, createdAt: Date.now(), touchedAt: Date.now(), keys: [] };
   });
   return { sessionId };
 }
 
 function normalizeStudySessionId(value) {
   const id = String(value || "");
-  return /^tab-\d+-[a-z0-9-]{6,80}$/i.test(id) ? id : "";
+  return /^tab-(?:\d+|unknown)-[a-z0-9-]{6,80}$/i.test(id) ? id : "";
 }
 
 function studySessionAudioKey(sessionId, word, accent) {
@@ -348,8 +353,18 @@ async function reconcileStudyAudioSessions() {
   const activeIds = new Set(tabs.map((tab) => Number(tab.id)).filter(Number.isInteger));
   const state = await storageGet({ [STUDY_SESSION_REGISTRY]: {} }).catch(() => ({ [STUDY_SESSION_REGISTRY]: {} }));
   const registry = state[STUDY_SESSION_REGISTRY] || {};
+  const now = Date.now();
   for (const [id, entry] of Object.entries(registry)) {
-    if (!activeIds.has(Number(entry?.tabId))) await deleteStudyAudioSession(id).catch(() => {});
+    const tabId = Number(entry?.tabId);
+    if (!Number.isInteger(tabId)) {
+      // Orion may report no tab id; such sessions cannot be matched to tabs,
+      // so drop them only after a generous age instead of immediately.
+      if (now - Number(entry?.createdAt || 0) > 6 * 60 * 60 * 1000) {
+        await deleteStudyAudioSession(id).catch(() => {});
+      }
+      continue;
+    }
+    if (!activeIds.has(tabId)) await deleteStudyAudioSession(id).catch(() => {});
   }
 }
 

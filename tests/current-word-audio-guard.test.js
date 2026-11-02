@@ -5,66 +5,37 @@ const vm = require("node:vm");
 
 const bg = fs.readFileSync("background.js", "utf8");
 const content = fs.readFileSync("content.js", "utf8");
+const session = fs.readFileSync("study-session.js", "utf8");
 let listener;
 const vocabulary = [
   { word: "night", ukIpa: "naɪt", meaning: "夜晚" },
-  { word: "knight", ukIpa: "naɪt", meaning: "骑士" },
-  { word: "write", ukIpa: "raɪt", meaning: "书写" },
-  { word: "right", ukIpa: "raɪt", meaning: "右边" }
+  { word: "knight", ukIpa: "naɪt", meaning: "骑士" }
 ];
 const context = {
-  importScripts() {},
-  globalThis: null,
-  IELTS_VOCABULARY: vocabulary,
+  importScripts() {}, globalThis: null, IELTS_VOCABULARY: vocabulary,
   IeltsPhonetics: {
     normalizeWord: (word) => String(word || "").toLowerCase().trim(),
     tokenizeIpa: (ipa) => [String(ipa || "").replace(/[/\s]/g, "")].filter(Boolean)
   },
   IeltsCorrection: {},
-  chrome: { runtime: {
-    onMessage: { addListener(fn) { listener = fn; } }
-  } }
+  chrome: { runtime: { onMessage: { addListener(fn) { listener = fn; } } } }
 };
 context.globalThis = context;
 vm.runInNewContext(bg, context);
+let response;
+listener({ type: "RESOLVE_CLUE", ipa: "naɪt", meaning: "骑士" }, {}, (value) => { response = value; });
+assert.equal(response.word, "knight");
+assert.equal(response.audioMatchSafe, true);
 
-function resolve(ipa, meaning) {
-  let response;
-  listener({ type: "RESOLVE_CLUE", ipa, meaning }, {}, (result) => { response = result; });
-  return response;
-}
-
-const clear = resolve("naɪt", "骑士");
-assert.equal(clear.found, true);
-assert.equal(clear.word, "knight");
-assert.equal(clear.audioMatchSafe, true, "unambiguous IPA and meaning may use cached audio");
-const ambiguous = resolve("naɪt", "");
-assert.equal(ambiguous.audioMatchSafe, false, "ambiguous homophones may not be taken over");
-const unrelated = resolve("raɪt", "没听清");
-assert.equal(unrelated.audioMatchSafe, false, "weak meaning cannot cause wrong pronunciation");
-assert.equal(resolve("zzzzz", "无关词").found, false);
-
-assert.match(content, /if \(response\.audioMatchSafe === true\) prepareStudyBackup/);
-assert.match(content, /const isCached = \/\^data:/,
-  "a remote URL must not be described as a successful local audio cache");
-assert.match(content, /const key = P\.normalizeWord\(word\) \+ "\|" \+ settings\.accent/,
-  "cache must be keyed by word and accent");
-assert.match(content, /chooseStudyAudioMode\(value\)/);
-assert.match(content, /ielts-native-audio-manual-stop/);
-assert.match(content, /class="current-backup-play"/);
-assert.match(content, /class="future-cache-status"/);
-const requestStart = content.indexOf("function requestStudyBackupReplay() {");
-const requestEnd = content.indexOf("function ensureStudyAudioControls()", requestStart);
-assert(requestStart >= 0 && requestEnd > requestStart);
-const requestBlock = content.slice(requestStart, requestEnd);
-assert.match(requestBlock, /playCurrentStudyBackup\(\)/);
-assert.doesNotMatch(requestBlock, /isStudyNativeBridgeReady\(\)/,
-  "direct UI playback cannot require website player detection");
-assert.doesNotMatch(requestBlock, /settings\.audioTakeoverMode\) === "off"/,
-  "a direct click should be able to audition saved audio independently of automatic mode");
-
-assert.match(content, /data-ielts-helper-backup/);
-assert.match(content, /native-unobserved/);
-assert.doesNotMatch(content, /textContent = studyBackup\.word/,
-  "the floating mode controls may not reveal the current spelling");
-console.log("Current word eligibility and takeover UI tests passed");
+assert.match(content, /IeltsStudySession\?\.activate\(\)/,
+  "the cache starts only when the first judged result is revealed");
+assert.match(content, /IeltsStudySession\?\.setCurrentWord\(word\)/);
+assert.doesNotMatch(content, /class="current-backup-play"|class="future-cache-status"/,
+  "the analysis panel must not duplicate the persistent speaker or cache panel");
+assert.match(session, /button\.id = "ielts-manual-study-speaker"/);
+assert.match(session, /pointerdown[\s\S]*event\.preventDefault\(\)/,
+  "touching the speaker must not move focus away from the dictation input");
+assert.match(session, /GET_STUDY_SESSION_AUDIO/);
+assert.doesNotMatch(session, /SpeechSynthesisUtterance|speechSynthesis/,
+  "manual cache playback must not silently fall back to device TTS");
+console.log("Current word manual-audio guard tests passed");

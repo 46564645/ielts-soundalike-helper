@@ -28,8 +28,38 @@ const PLURAL_CACHE_MAX = 400;
 const PLURAL_CACHE_TTL = 90 * 24 * 60 * 60 * 1000;
 const SPEAKING_JOB_KEY = "speakingExtractionJobV1";
 const SPEAKING_MODEL = "deepseek-v4-pro";
+const STUDY_SESSION_REGISTRY = "studyAudioSessionsV1";
+const STUDY_SESSION_AUDIO_PREFIX = "studyAudioSessionV1:";
+const STUDY_SESSION_CACHE = "ielts-study-session-audio-v1";
+const studySessionMemory = new Map();
+const studySessionInFlight = new Map();
+let studySessionWriteChain = Promise.resolve();
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "START_STUDY_AUDIO_SESSION") {
+    startStudyAudioSession(sender)
+      .then((payload) => sendResponse({ ok: true, ...payload }))
+      .catch((error) => sendResponse({ ok: false, error: readableError(error) }));
+    return true;
+  }
+  if (message?.type === "PREFETCH_STUDY_SESSION_AUDIO") {
+    prefetchStudySessionAudio(message.sessionId, message.items, message.accent, sender)
+      .then((payload) => sendResponse({ ok: true, ...payload }))
+      .catch((error) => sendResponse({ ok: false, error: readableError(error) }));
+    return true;
+  }
+  if (message?.type === "GET_STUDY_SESSION_AUDIO") {
+    getStudySessionAudio(message.sessionId, message.word, message.accent)
+      .then((payload) => sendResponse({ ok: true, ...payload }))
+      .catch((error) => sendResponse({ ok: false, available: false, error: readableError(error) }));
+    return true;
+  }
+  if (message?.type === "END_STUDY_AUDIO_SESSION") {
+    deleteStudyAudioSession(String(message.sessionId || ""))
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: readableError(error) }));
+    return true;
+  }
   if (message?.type === "PREFETCH_AUDIO_WORDS") {
     prefetchAudioWords(message.words, message.accent)
       .then((result) => sendResponse({ ok: true, ...result }))
@@ -111,6 +141,217 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   return false;
 });
+
+if (chrome.tabs?.onRemoved) {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    void cleanupStudyAudioSessionsForTab(tabId);
+  });
+}
+if (chrome.tabs?.query) void reconcileStudyAudioSessions();
+
+async function startStudyAudioSession(sender) {
+  const tabId = Number(sender?.tab?.id);
+  if (!Number.isInteger(tabId)) throw new Error("无法识别当前练习标签页");
+  const sessionId = `tab-${tabId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  await updateStudySessionRegistry((registry) => {
+    registry[sessionId] = { tabId, createdAt: Date.now(), touchedAt: Date.now(), keys: [] };
+  });
+  return { sessionId };
+}
+
+function normalizeStudySessionId(value) {
+  const id = String(value || "");
+  return /^tab-\d+-[a-z0-9-]{6,80}$/i.test(id) ? id : "";
+}
+
+function studySessionAudioKey(sessionId, word, accent) {
+  const normalized = P.normalizeWord(word);
+  return normalized && normalizeStudySessionId(sessionId)
+    ? `${STUDY_SESSION_AUDIO_PREFIX}${sessionId}:${normalizeAccent(accent)}:${normalized}` : "";
+}
+
+function safeStudyAudioUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    if (url.protocol !== "https:") return "";
+    if (!["idictation-article.oss-cn-beijing.aliyuncs.com", "dict.youdao.com"].includes(url.hostname)) return "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
+async function prefetchStudySessionAudio(rawSessionId, rawItems, rawAccent, sender) {
+  const sessionId = normalizeStudySessionId(rawSessionId);
+  if (!sessionId) throw new Error("练习缓存会话无效");
+  const registry = (await storageGet({ [STUDY_SESSION_REGISTRY]: {} }))[STUDY_SESSION_REGISTRY] || {};
+  const session = registry[sessionId];
+  if (!session) throw new Error("练习缓存会话已结束");
+  const senderTabId = Number(sender?.tab?.id);
+  if (Number.isInteger(senderTabId) && Number(session.tabId) !== senderTabId) throw new Error("练习缓存会话不属于当前标签页");
+  const accent = normalizeAccent(rawAccent);
+  const seen = new Set();
+  const items = (Array.isArray(rawItems) ? rawItems : []).map((item) => {
+    const word = P.normalizeWord(item?.word);
+    const audioUrl = safeStudyAudioUrl(item?.audioUrl);
+    const key = studySessionAudioKey(sessionId, word, accent);
+    if (!word || !audioUrl || !key || seen.has(key)) return null;
+    seen.add(key);
+    return { word, audioUrl, key };
+  }).filter(Boolean).slice(0, 40);
+  const statuses = {};
+  const reasons = {};
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const item = items[cursor++];
+      try {
+        await loadStudySessionAudio(item.key, item.audioUrl);
+        statuses[item.word] = "ready";
+      } catch (error) {
+        statuses[item.word] = "failed";
+        reasons[item.word] = formatAudioFailure(readableError(error));
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(2, items.length) }, worker));
+  const readyKeys = items.filter((item) => statuses[item.word] === "ready").map((item) => item.key);
+  if (readyKeys.length) await updateStudySessionRegistry((next) => {
+    const target = next[sessionId];
+    if (!target) return;
+    target.touchedAt = Date.now();
+    target.keys = [...new Set([...(Array.isArray(target.keys) ? target.keys : []), ...readyKeys])];
+  });
+  return {
+    total: items.length,
+    count: Object.values(statuses).filter((status) => status === "ready").length,
+    statuses,
+    reasons
+  };
+}
+
+async function loadStudySessionAudio(key, audioUrl) {
+  if (studySessionMemory.has(key)) return studySessionMemory.get(key);
+  const cacheStore = await openStudySessionCache();
+  if (cacheStore) {
+    try {
+      const cached = await cacheStore.match(studySessionCacheUrl(key));
+      if (cached?.ok) {
+        const dataUrl = await blobToDataUrl(await cached.blob());
+        studySessionMemory.set(key, dataUrl);
+        return dataUrl;
+      }
+    } catch {}
+  }
+  const stored = (await storageGet({ [key]: "" }))[key];
+  if (typeof stored === "string" && /^data:(?:audio\/|application\/octet-stream|binary\/octet-stream)/i.test(stored)) {
+    studySessionMemory.set(key, stored);
+    return stored;
+  }
+  if (studySessionInFlight.has(key)) return studySessionInFlight.get(key);
+  const request = (async () => {
+    const response = await fetchAudioWithTimeout(audioUrl, 12000);
+    if (!response.ok) throw new Error(`音频服务返回 ${response.status}`);
+    const blob = await response.blob();
+    if (!blob.size || blob.size > 2 * 1024 * 1024) throw new Error(blob.size ? "音频文件过大" : "音频内容为空");
+    if (/^(?:text\/|application\/json)/i.test(blob.type)) throw new Error("音频源返回网页而非音频");
+    const dataUrl = await blobToDataUrl(blob);
+    let persisted = false;
+    if (cacheStore) {
+      try {
+        await cacheStore.put(studySessionCacheUrl(key), new Response(blob, {
+          headers: { "Content-Type": blob.type || "audio/mpeg" }
+        }));
+        persisted = true;
+      } catch {}
+    }
+    if (!persisted) await storageSet({ [key]: dataUrl });
+    studySessionMemory.set(key, dataUrl);
+    return dataUrl;
+  })().finally(() => studySessionInFlight.delete(key));
+  studySessionInFlight.set(key, request);
+  return request;
+}
+
+async function getStudySessionAudio(rawSessionId, rawWord, rawAccent) {
+  const key = studySessionAudioKey(rawSessionId, rawWord, rawAccent);
+  if (!key) return { available: false, audioUrl: "" };
+  if (studySessionMemory.has(key)) return { available: true, audioUrl: studySessionMemory.get(key) };
+  const cacheStore = await openStudySessionCache();
+  if (cacheStore) {
+    try {
+      const cached = await cacheStore.match(studySessionCacheUrl(key));
+      if (cached?.ok) {
+        const audioUrl = await blobToDataUrl(await cached.blob());
+        studySessionMemory.set(key, audioUrl);
+        return { available: true, audioUrl };
+      }
+    } catch {}
+  }
+  const stored = (await storageGet({ [key]: "" }))[key];
+  const available = typeof stored === "string" && /^data:(?:audio\/|application\/octet-stream|binary\/octet-stream)/i.test(stored);
+  if (available) studySessionMemory.set(key, stored);
+  return { available, audioUrl: available ? stored : "" };
+}
+
+function studySessionCacheUrl(key) {
+  return `https://ielts-session-cache.invalid/${encodeURIComponent(key)}`;
+}
+
+async function openStudySessionCache() {
+  if (typeof caches === "undefined" || typeof caches.open !== "function") return null;
+  try { return await caches.open(STUDY_SESSION_CACHE); } catch { return null; }
+}
+
+function updateStudySessionRegistry(mutator) {
+  const task = studySessionWriteChain.catch(() => {}).then(async () => {
+    const state = await storageGet({ [STUDY_SESSION_REGISTRY]: {} });
+    const registry = state[STUDY_SESSION_REGISTRY] && typeof state[STUDY_SESSION_REGISTRY] === "object"
+      ? { ...state[STUDY_SESSION_REGISTRY] } : {};
+    mutator(registry);
+    await storageSet({ [STUDY_SESSION_REGISTRY]: registry });
+    return registry;
+  });
+  studySessionWriteChain = task.catch(() => {});
+  return task;
+}
+
+async function deleteStudyAudioSession(rawSessionId) {
+  const sessionId = normalizeStudySessionId(rawSessionId);
+  if (!sessionId) return;
+  let keys = [];
+  await updateStudySessionRegistry((registry) => {
+    keys = Array.isArray(registry[sessionId]?.keys) ? registry[sessionId].keys.slice() : [];
+    delete registry[sessionId];
+  });
+  for (const key of keys) studySessionMemory.delete(key);
+  const cacheStore = await openStudySessionCache();
+  if (cacheStore) {
+    for (const key of keys) await cacheStore.delete(studySessionCacheUrl(key)).catch(() => false);
+  }
+  if (keys.length) await storageRemove(keys);
+}
+
+async function cleanupStudyAudioSessionsForTab(tabId) {
+  const state = await storageGet({ [STUDY_SESSION_REGISTRY]: {} }).catch(() => ({ [STUDY_SESSION_REGISTRY]: {} }));
+  const registry = state[STUDY_SESSION_REGISTRY] || {};
+  const ids = Object.keys(registry).filter((id) => Number(registry[id]?.tabId) === Number(tabId));
+  for (const id of ids) await deleteStudyAudioSession(id).catch(() => {});
+}
+
+async function reconcileStudyAudioSessions() {
+  const tabs = await new Promise((resolve) => {
+    chrome.tabs.query({ url: "https://www.idictation.cn/*" }, (items) => {
+      resolve(chrome.runtime.lastError ? [] : Array.isArray(items) ? items : []);
+    });
+  }).catch(() => []);
+  const activeIds = new Set(tabs.map((tab) => Number(tab.id)).filter(Number.isInteger));
+  const state = await storageGet({ [STUDY_SESSION_REGISTRY]: {} }).catch(() => ({ [STUDY_SESSION_REGISTRY]: {} }));
+  const registry = state[STUDY_SESSION_REGISTRY] || {};
+  for (const [id, entry] of Object.entries(registry)) {
+    if (!activeIds.has(Number(entry?.tabId))) await deleteStudyAudioSession(id).catch(() => {});
+  }
+}
 
 // Prefetch is intentionally bounded and never triggers speech or page playback.
 // Download short batches quietly: rapid parallel requests can cause audio
@@ -639,10 +880,7 @@ async function analyzeAttemptMessage(message) {
   const correctItem = BY_WORD.get(correctKey);
   if (!correctItem) return { available: false, reason: "未在本地雅思词库中找到正确词。" };
 
-  const [correctIpaResult, correctAudio] = await Promise.all([
-    resolveIpa(correctItem, accent),
-    fetchAudio(correctItem, accent).catch(() => fallbackAudioUrl(correctItem, accent))
-  ]);
+  const correctIpaResult = await resolveIpa(correctItem, accent);
 
   const soundSpelling = C.analyzeSoundSpelling(typed, correctItem.word, correctIpaResult.ipa);
   const spelling = P.alignCharacters(typed, correctItem.word);
@@ -659,7 +897,6 @@ async function analyzeAttemptMessage(message) {
       ? `本题识别出 ${soundSpelling.issues.length} 个声音—字母映射问题。`
       : "本题字母差异未形成可复用的声音错误模式。",
     correctIpa: correctIpaResult.ipa,
-    correctAudio,
     learning
   };
 }

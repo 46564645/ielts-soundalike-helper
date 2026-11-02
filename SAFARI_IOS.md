@@ -13,7 +13,7 @@
 输出位于：
 
 - `dist/safari-extension/`：供 Apple 打包器读取的扩展资源目录。
-- `dist/ielts-soundalike-helper-safari-v2.9.0.zip`：可传到 Mac 或 App Store Connect 的压缩包。
+- `dist/ielts-soundalike-helper-safari-v2.11.0.zip`：可传到 Mac 或 App Store Connect 的压缩包。
 
 该步骤只整理 Web Extension 资源，不会生成可直接安装到 iPhone 的 `.ipa`。
 
@@ -23,7 +23,7 @@ Apple 现在支持从任意桌面浏览器上传 Safari Web Extension ZIP，不�
 
 1. 在 App Store Connect 新建 App，平台选择 iOS，并创建唯一的 Bundle ID。
 2. 打开该 App 的 Xcode Cloud 页面，在 Safari Web Extension Packager 下点击 Upload。
-3. 上传 `dist/ielts-soundalike-helper-safari-v2.9.0.zip`。
+3. 上传 `dist/ielts-soundalike-helper-safari-v2.11.0.zip`。
 4. 打包完成后通过 TestFlight 安装到自己的 iPhone 进行测试。
 
 ## 2B. 有 Mac：生成 iOS Xcode 工程
@@ -55,7 +55,7 @@ xcrun safari-web-extension-packager \
 - 上下拖动红色标题栏可调整抽屉高度，关闭键保持可用。
 - 手机端隐藏实体键盘快捷键提示，播放和收藏按钮扩大到触控尺寸。
 - 音标、声音—字母块、复数、DeepSeek 解释和收藏继续使用原有逻辑。
-- Safari 不支持 `chrome.tts`；扩展使用网页音频，并在需要时回退到 iOS 的 `speechSynthesis`。
+- 练习页使用网页已经下发的单词音频；只在用户点击可拖动小喇叭时播放，不使用设备语音代替缓存。
 - 爱听写的正文捕获通过 `safari-page-loader.js` 注入页面环境，避免依赖 Chromium 的 `world: MAIN` 清单字段。
 
 ## 4. 当前验证边界

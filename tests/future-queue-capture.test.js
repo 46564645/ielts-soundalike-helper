@@ -3,88 +3,59 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-function createHarness(payload) {
+function harness(payload, state) {
   const attrs = new Map();
-  const dispatched = [];
-  const documentElement = {
-    setAttribute(key, value) { attrs.set(key, value); },
-    getAttribute(key) { return attrs.get(key) || null; }
+  const events = [];
+  const root = {
+    setAttribute(name, value) { attrs.set(name, value); },
+    getAttribute(name) { return attrs.get(name) || null; }
   };
-  const listeners = new Map();
+  const app = { __vue_app__: { _instance: { setupState: { t: state } } } };
   const document = {
-    documentElement,
-    addEventListener(type, listener) {
-      const group = listeners.get(type) || [];
-      group.push(listener);
-      listeners.set(type, group);
-    },
-    dispatchEvent(event) {
-      dispatched.push(event.type);
-      for (const listener of listeners.get(event.type) || []) listener(event);
-    }
+    documentElement: root,
+    querySelector(selector) { return selector === "#app" ? app : null; },
+    querySelectorAll() { return []; },
+    addEventListener() {},
+    dispatchEvent(event) { events.push(event.type); }
   };
-  class MockXHR {}
-  MockXHR.prototype.open = function () {};
-  MockXHR.prototype.send = function () {};
-  MockXHR.prototype.addEventListener = function () {};
-  const response = {
-    headers: { get: () => "application/json" },
-    clone() { return { json: async () => payload }; }
+  class XHR {}
+  XHR.prototype.open = function () {};
+  XHR.prototype.send = function () {};
+  const response = { clone: () => ({ json: async () => payload }) };
+  const window = {
+    fetch: async () => response,
+    setInterval() { return 1; }, clearInterval() {}, addEventListener() {}
   };
   const context = {
-    window: { fetch: async () => response },
-    XMLHttpRequest: MockXHR,
-    document,
+    window, XMLHttpRequest: XHR, document, URL, WeakSet, Reflect,
+    location: { hostname: "www.idictation.cn", pathname: "/home", origin: "https://www.idictation.cn", href: "https://www.idictation.cn/home" },
     CustomEvent: class { constructor(type) { this.type = type; } },
-    Event: class { constructor(type) { this.type = type; } },
-    URL,
-    location: {
-      hostname: "www.idictation.cn",
-      pathname: "/home",
-      origin: "https://www.idictation.cn",
-      href: "https://www.idictation.cn/home"
-    },
-    Date
+    Event: class { constructor(type) { this.type = type; } }, Date
   };
   vm.runInNewContext(fs.readFileSync("page-capture.js", "utf8"), context);
-  return { context, attrs, dispatched };
+  return { window, attrs, events };
 }
 
 (async () => {
-  const dataset = { data: { words: [
-    { word: "apple" }, { word: "banana" }, { word: "cat" }, { word: "dog" }
-  ] } };
-  const h = createHarness(dataset);
-  await h.context.window.fetch("/api/study/word/list");
+  const audio = (word) => `https://idictation-article.oss-cn-beijing.aliyuncs.com/wy_audios/${word}.mp3`;
+  const rows = ["file", "command", "display"].map((word, index) => ({
+    id: index + 1, word_id: index + 11, word,
+    "phonetic-y": audio(word + "-uk"), "phonetic-m": audio(word + "-us")
+  }));
+  const runtimeWords = [rows[1], rows[2], rows[1], rows[0]];
+  const h = harness({ values: { data: rows } }, {
+    words: runtimeWords, currentWord: runtimeWords[1], currentIndex: 1, wordsCopy: runtimeWords.slice()
+  });
+  await h.window.fetch("/api/study/lexicon/v1/list");
   await new Promise((resolve) => setImmediate(resolve));
-  const queue = JSON.parse(h.attrs.get("data-ielts-future-audio-queue"));
-  assert.deepEqual(Array.from(queue.words), ["apple", "banana", "cat", "dog"]);
-  assert.equal(h.dispatched.filter((e) => e === "ielts-future-audio-queue-ready").length, 1);
-
-  // An incorrect answer can return several times in the same session.
-  const retries = createHarness({ data: [{ word: "again" }, { word: "again" }, { word: "again" }] });
-  await retries.context.window.fetch("/api/study/word/list");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(
-    Array.from(JSON.parse(retries.attrs.get("data-ielts-future-audio-queue")).words),
-    ["again"],
-    "repeated review words should be captured once for preloading"
-  );
-
-  const single = createHarness({ data: [{ word: "apple" }] });
-  await single.context.window.fetch("/api/study/word/list");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(single.attrs.get("data-ielts-future-audio-queue"), undefined);
-
-  const wrongEndpoint = createHarness(dataset);
-  await wrongEndpoint.context.window.fetch("/api/account/profile");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(wrongEndpoint.attrs.get("data-ielts-future-audio-queue"), undefined);
-
-  const max = createHarness({ list: Array.from({ length: 90 }, (_, i) => ({ word: "word" + i })) });
-  await max.context.window.fetch("/api/study/word/list");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(max.attrs.get("data-ielts-future-audio-queue"), undefined, "numbered tokens are not considered ordinary vocabulary");
-
-  console.log("Future study queue capture tests passed");
+  const catalog = JSON.parse(h.attrs.get("data-ielts-study-audio-catalog"));
+  assert.equal(catalog.items.length, 3);
+  assert.equal(catalog.items[1].word, "command");
+  const queue = JSON.parse(h.attrs.get("data-ielts-study-runtime-queue"));
+  assert.deepEqual(Array.from(queue.occurrences, (item) => item.word), ["command", "display", "command", "file"]);
+  assert.equal(queue.currentIndex, 1);
+  assert.equal(queue.source, "vue-runtime");
+  assert.notEqual(queue.occurrences[0].occurrenceId, queue.occurrences[2].occurrenceId,
+    "repeat positions stay distinct while sharing one word audio key");
+  console.log("Runtime study queue capture tests passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

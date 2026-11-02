@@ -29,7 +29,7 @@ foreach ($directory in $directories) {
 $files = @(
   "background.js",
   "comparison.css", "comparison.html", "comparison.js",
-  "content.js", "page-capture.js", "safari-page-loader.js",
+  "content.js", "study-session.js", "page-capture.js", "safari-page-loader.js",
   "plural.css",
   "popup.css", "popup-extra.css", "popup.html", "popup.js",
   "sound-favorites.css", "sound-favorites.html", "sound-favorites.js",

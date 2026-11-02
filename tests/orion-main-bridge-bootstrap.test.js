@@ -11,7 +11,7 @@ assert.equal(main.length, 1);
 assert.equal(fallback.length, 1, "Orion must have a second main-world bridge loading path");
 assert(orionManifest.web_accessible_resources.some((entry) => entry.resources.includes("page-capture.js")));
 assert(safariManifest.content_scripts.some((entry) => entry.js.includes("safari-page-loader.js")));
-assert.match(fs.readFileSync("page-capture.js", "utf8"), /__ieltsSoundalikeMainBridgeV211/);
+assert.match(fs.readFileSync("page-capture.js", "utf8"), /__ieltsSoundalikeMainBridgeV220/);
 
 const source = fs.readFileSync("safari-page-loader.js", "utf8");
 let root = null;

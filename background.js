@@ -31,9 +31,17 @@ const SPEAKING_MODEL = "deepseek-v4-pro";
 const STUDY_SESSION_REGISTRY = "studyAudioSessionsV1";
 const STUDY_SESSION_AUDIO_PREFIX = "studyAudioSessionV1:";
 const STUDY_SESSION_CACHE = "ielts-study-session-audio-v1";
+const OFFLINE_AUDIO_CACHE = "ielts-study-offline-audio-v1";
+const OFFLINE_AUDIO_PREFIX = "studyOfflineAudioV1:";
+const OFFLINE_AUDIO_INDEX = "studyOfflineAudioIndexV1";
+const OFFLINE_AUDIO_MAX_ITEMS = 2000;
+const OFFLINE_AUDIO_MAX_CHARS = 30 * 1024 * 1024;
+const OFFLINE_AUDIO_MEMORY_MAX = 200;
 const studySessionMemory = new Map();
 const studySessionInFlight = new Map();
 let studySessionWriteChain = Promise.resolve();
+const offlineAudioMemory = new Map();
+let offlineAudioWriteChain = Promise.resolve();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "START_STUDY_AUDIO_SESSION") {
@@ -57,6 +65,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "END_STUDY_AUDIO_SESSION") {
     deleteStudyAudioSession(String(message.sessionId || ""))
       .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: readableError(error) }));
+    return true;
+  }
+  if (message?.type === "OFFLINE_AUDIO_STATS") {
+    offlineAudioStats()
+      .then((payload) => sendResponse({ ok: true, ...payload }))
+      .catch((error) => sendResponse({ ok: false, error: readableError(error) }));
+    return true;
+  }
+  if (message?.type === "CLEAR_OFFLINE_AUDIO") {
+    clearOfflineAudio()
+      .then((payload) => sendResponse({ ok: true, ...payload }))
       .catch((error) => sendResponse({ ok: false, error: readableError(error) }));
     return true;
   }
@@ -202,7 +222,7 @@ async function prefetchStudySessionAudio(rawSessionId, rawItems, rawAccent, send
     const key = studySessionAudioKey(sessionId, word, accent);
     if (!word || !audioUrl || !key || seen.has(key)) return null;
     seen.add(key);
-    return { word, audioUrl, key };
+    return { word, audioUrl, key, offlineKey: offlineAudioKey(word, accent) };
   }).filter(Boolean).slice(0, 40);
   const statuses = {};
   const reasons = {};
@@ -211,7 +231,7 @@ async function prefetchStudySessionAudio(rawSessionId, rawItems, rawAccent, send
     while (cursor < items.length) {
       const item = items[cursor++];
       try {
-        await loadStudySessionAudio(item.key, item.audioUrl);
+        await loadStudySessionAudio(item.key, item.audioUrl, item.offlineKey);
         statuses[item.word] = "ready";
       } catch (error) {
         statuses[item.word] = "failed";
@@ -235,7 +255,7 @@ async function prefetchStudySessionAudio(rawSessionId, rawItems, rawAccent, send
   };
 }
 
-async function loadStudySessionAudio(key, audioUrl) {
+async function loadStudySessionAudio(key, audioUrl, offlineKey = "") {
   if (studySessionMemory.has(key)) return studySessionMemory.get(key);
   const cacheStore = await openStudySessionCache();
   if (cacheStore) {
@@ -272,6 +292,7 @@ async function loadStudySessionAudio(key, audioUrl) {
     }
     if (!persisted) await storageSet({ [key]: dataUrl });
     studySessionMemory.set(key, dataUrl);
+    if (offlineKey) await storeOfflineAudio(offlineKey, blob, dataUrl).catch(() => false);
     return dataUrl;
   })().finally(() => studySessionInFlight.delete(key));
   studySessionInFlight.set(key, request);
@@ -295,8 +316,12 @@ async function getStudySessionAudio(rawSessionId, rawWord, rawAccent) {
   }
   const stored = (await storageGet({ [key]: "" }))[key];
   const available = typeof stored === "string" && /^data:(?:audio\/|application\/octet-stream|binary\/octet-stream)/i.test(stored);
-  if (available) studySessionMemory.set(key, stored);
-  return { available, audioUrl: available ? stored : "" };
+  if (available) {
+    studySessionMemory.set(key, stored);
+    return { available: true, audioUrl: stored };
+  }
+  const offline = await loadOfflineAudio(rawWord, rawAccent);
+  return offline.available ? offline : { available: false, audioUrl: "" };
 }
 
 function studySessionCacheUrl(key) {
@@ -306,6 +331,127 @@ function studySessionCacheUrl(key) {
 async function openStudySessionCache() {
   if (typeof caches === "undefined" || typeof caches.open !== "function") return null;
   try { return await caches.open(STUDY_SESSION_CACHE); } catch { return null; }
+}
+
+function offlineAudioKey(rawWord, rawAccent) {
+  const word = P.normalizeWord(rawWord);
+  return word ? `${OFFLINE_AUDIO_PREFIX}${normalizeAccent(rawAccent)}:${word}` : "";
+}
+
+function offlineAudioCacheUrl(key) {
+  return `https://ielts-offline-cache.invalid/${encodeURIComponent(key)}`;
+}
+
+async function openOfflineAudioCache() {
+  if (typeof caches === "undefined" || typeof caches.open !== "function") return null;
+  try { return await caches.open(OFFLINE_AUDIO_CACHE); } catch { return null; }
+}
+
+function updateOfflineAudioIndex(mutator) {
+  const task = offlineAudioWriteChain.catch(() => {}).then(async () => {
+    const state = await storageGet({ [OFFLINE_AUDIO_INDEX]: [] });
+    const index = Array.isArray(state[OFFLINE_AUDIO_INDEX])
+      ? state[OFFLINE_AUDIO_INDEX].filter((entry) => entry && typeof entry.key === "string") : [];
+    mutator(index);
+    await storageSet({ [OFFLINE_AUDIO_INDEX]: index });
+    return index;
+  });
+  offlineAudioWriteChain = task.catch(() => {});
+  return task;
+}
+
+function rememberOfflineAudio(key, dataUrl) {
+  offlineAudioMemory.set(key, dataUrl);
+  while (offlineAudioMemory.size > OFFLINE_AUDIO_MEMORY_MAX) {
+    offlineAudioMemory.delete(offlineAudioMemory.keys().next().value);
+  }
+}
+
+async function storeOfflineAudio(key, blob, dataUrl) {
+  if (!key || !blob?.size) return false;
+  let persisted = false;
+  const store = await openOfflineAudioCache();
+  if (store) {
+    try {
+      await store.put(offlineAudioCacheUrl(key), new Response(blob, {
+        headers: { "Content-Type": blob.type || "audio/mpeg" }
+      }));
+      persisted = true;
+      const keys = await store.keys();
+      for (const stale of keys.slice(0, Math.max(0, keys.length - OFFLINE_AUDIO_MAX_ITEMS))) {
+        await store.delete(stale).catch(() => false);
+      }
+    } catch {}
+  }
+  if (!persisted && typeof dataUrl === "string" && dataUrl.length <= AUDIO_LOCAL_MAX_ITEM_CHARS) {
+    const evicted = [];
+    await updateOfflineAudioIndex((index) => {
+      const existing = index.find((entry) => entry.key === key);
+      if (existing) existing.size = dataUrl.length;
+      else index.push({ key, size: dataUrl.length });
+      let total = index.reduce((sum, entry) => sum + Number(entry.size || 0), 0);
+      while (index.length > OFFLINE_AUDIO_MAX_ITEMS || total > OFFLINE_AUDIO_MAX_CHARS) {
+        const oldest = index.shift();
+        total -= Number(oldest.size || 0);
+        evicted.push(oldest.key);
+      }
+    });
+    if (evicted.length) await storageRemove(evicted);
+    await storageSet({ [key]: dataUrl });
+    persisted = true;
+  }
+  if (persisted) rememberOfflineAudio(key, dataUrl);
+  return persisted;
+}
+
+async function loadOfflineAudio(rawWord, rawAccent) {
+  const key = offlineAudioKey(rawWord, rawAccent);
+  if (!key) return { available: false, audioUrl: "" };
+  if (offlineAudioMemory.has(key)) return { available: true, audioUrl: offlineAudioMemory.get(key) };
+  const store = await openOfflineAudioCache();
+  if (store) {
+    try {
+      const cached = await store.match(offlineAudioCacheUrl(key));
+      if (cached?.ok) {
+        const dataUrl = await blobToDataUrl(await cached.blob());
+        if (dataUrl) {
+          rememberOfflineAudio(key, dataUrl);
+          return { available: true, audioUrl: dataUrl };
+        }
+      }
+    } catch {}
+  }
+  const stored = (await storageGet({ [key]: "" }))[key];
+  const available = typeof stored === "string" && /^data:(?:audio\/|application\/octet-stream|binary\/octet-stream)/i.test(stored);
+  if (available) rememberOfflineAudio(key, stored);
+  return { available, audioUrl: available ? stored : "" };
+}
+
+async function offlineAudioStats() {
+  const store = await openOfflineAudioCache();
+  let cached = 0;
+  if (store) {
+    try { cached = (await store.keys()).length; } catch {}
+  }
+  const state = await storageGet({ [OFFLINE_AUDIO_INDEX]: [] });
+  const fallback = Array.isArray(state[OFFLINE_AUDIO_INDEX]) ? state[OFFLINE_AUDIO_INDEX].length : 0;
+  return { count: Math.max(cached, fallback), cache: cached, fallback };
+}
+
+async function clearOfflineAudio() {
+  offlineAudioMemory.clear();
+  const store = await openOfflineAudioCache();
+  if (store) {
+    try {
+      for (const request of await store.keys()) await store.delete(request).catch(() => false);
+    } catch {}
+  }
+  const state = await storageGet({ [OFFLINE_AUDIO_INDEX]: [] });
+  const keys = Array.isArray(state[OFFLINE_AUDIO_INDEX])
+    ? state[OFFLINE_AUDIO_INDEX].map((entry) => entry.key).filter(Boolean) : [];
+  if (keys.length) await storageRemove(keys);
+  await storageSet({ [OFFLINE_AUDIO_INDEX]: [] });
+  return { cleared: keys.length };
 }
 
 function updateStudySessionRegistry(mutator) {

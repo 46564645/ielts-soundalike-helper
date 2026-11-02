@@ -63,5 +63,19 @@ function send(message, tabId = 42) {
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal([...storage.keys()].some((key) => key.includes(started.sessionId)), false,
     "closing the exercise tab removes only its session namespace");
+
+  const offline = await send({
+    type: "GET_STUDY_SESSION_AUDIO", sessionId: started.sessionId, accent: "us", word: "command"
+  });
+  assert.equal(offline.available, true, "offline audio survives closing the exercise tab");
+  assert.match(offline.audioUrl, /^data:audio\/mpeg;base64,/);
+
+  const restarted = await send({ type: "START_STUDY_AUDIO_SESSION" });
+  const offlineInNewSession = await send({
+    type: "GET_STUDY_SESSION_AUDIO", sessionId: restarted.sessionId, accent: "us", word: "command"
+  });
+  assert.equal(offlineInNewSession.available, true, "offline audio is reusable in a new session");
+  assert.match(offlineInNewSession.audioUrl, /^data:audio\/mpeg;base64,/);
+
   console.log("Study session cache lifecycle tests passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

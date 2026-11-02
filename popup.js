@@ -19,6 +19,8 @@ const clearDeepseek = document.querySelector("#clear-deepseek");
 const deepseekStatus = document.querySelector("#deepseek-status");
 const extractSpeaking = document.querySelector("#extract-speaking");
 const speakingEntryStatus = document.querySelector("#speaking-entry-status");
+const offlineAudioStats = document.querySelector("#offline-audio-stats");
+const clearOfflineAudio = document.querySelector("#clear-offline-audio");
 let savedTimer = 0;
 let hasDeepseekKey = false;
 
@@ -80,6 +82,25 @@ clearDeepseek.addEventListener("click", () => {
 reopen.addEventListener("click", () => {
   settingsStorage.set({ overlayReopenNonce: Date.now() }, () => showSaved("已请求重新显示"));
 });
+refreshOfflineAudioStats();
+clearOfflineAudio.addEventListener("click", () => {
+  clearOfflineAudio.disabled = true;
+  chrome.runtime.sendMessage({ type: "CLEAR_OFFLINE_AUDIO" }, () => {
+    clearOfflineAudio.disabled = false;
+    refreshOfflineAudioStats();
+    showSaved("离线音频已清空");
+  });
+});
+
+function refreshOfflineAudioStats() {
+  chrome.runtime.sendMessage({ type: "OFFLINE_AUDIO_STATS" }, (response) => {
+    if (chrome.runtime.lastError || !response?.ok) {
+      offlineAudioStats.textContent = "不可用";
+      return;
+    }
+    offlineAudioStats.textContent = response.count ? `${response.count} 个词` : "尚无缓存";
+  });
+}
 extractSpeaking.addEventListener("click", extractSpeakingMaterial);
 
 function persist() {

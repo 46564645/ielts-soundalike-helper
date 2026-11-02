@@ -18,3 +18,34 @@
 .sound-favorites-link { border-color: #eee1b3; background: linear-gradient(135deg, #fffaf0, #fff); }
 .sound-favorites-link b { color: #b57a00; }
 .sound-favorites-link:hover { border-color: #e3c76b; background: #fff8df; }
+
+.offline-audio {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 14px;
+  border-bottom: 1px solid #edf0f5;
+  background: #f4fbf9;
+}
+.offline-audio > span { display: flex; flex-direction: column; gap: 3px; }
+.offline-audio strong { font-size: 12px; }
+.offline-audio small { color: #7e899a; font-size: 9px; }
+.offline-audio-actions { display: flex; align-items: center; gap: 8px; }
+.offline-audio-actions b { color: #0f6b72; font-size: 10px; white-space: nowrap; }
+.offline-audio-actions button {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid #cfe5e0;
+  border-radius: 8px;
+  background: #fff;
+  color: #0f6b72;
+  font-size: 9px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.offline-audio-actions button:hover { background: #ecf8f5; }
+.offline-audio-actions button:disabled { cursor: wait; opacity: .6; }
+@media (max-width: 430px) {
+  .offline-audio-actions button { min-height: 36px; }
+}

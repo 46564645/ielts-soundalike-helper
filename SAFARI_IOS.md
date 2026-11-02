@@ -13,7 +13,7 @@
 输出位于：
 
 - `dist/safari-extension/`：供 Apple 打包器读取的扩展资源目录。
-- `dist/ielts-soundalike-helper-safari-v2.11.1.zip`：可传到 Mac 或 App Store Connect 的压缩包。
+- `dist/ielts-soundalike-helper-safari-v2.11.2.zip`：可传到 Mac 或 App Store Connect 的压缩包。
 
 该步骤只整理 Web Extension 资源，不会生成可直接安装到 iPhone 的 `.ipa`。
 
@@ -23,7 +23,7 @@ Apple 现在支持从任意桌面浏览器上传 Safari Web Extension ZIP，不�
 
 1. 在 App Store Connect 新建 App，平台选择 iOS，并创建唯一的 Bundle ID。
 2. 打开该 App 的 Xcode Cloud 页面，在 Safari Web Extension Packager 下点击 Upload。
-3. 上传 `dist/ielts-soundalike-helper-safari-v2.11.1.zip`。
+3. 上传 `dist/ielts-soundalike-helper-safari-v2.11.2.zip`。
 4. 打包完成后通过 TestFlight 安装到自己的 iPhone 进行测试。
 
 ## 2B. 有 Mac：生成 iOS Xcode 工程

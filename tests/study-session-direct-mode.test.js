@@ -95,6 +95,8 @@ function fire(type) {
   handler();
 }
 
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 (async () => {
   const us = "https://idictation-article.oss-cn-beijing.aliyuncs.com/wy_audios/command-us.mp3";
   const uk = "https://idictation-article.oss-cn-beijing.aliyuncs.com/wy_audios/command-uk.mp3";
@@ -110,6 +112,7 @@ function fire(type) {
   fire("ielts-study-runtime-queue-ready");
 
   await context.IeltsStudySession.activate();
+  await tick();
   const status = context.IeltsStudySession.getStatus();
   assert.equal(status.active, true, "speaker session must survive a missing background worker");
   assert.equal(status.phase, "ready");
@@ -117,6 +120,7 @@ function fire(type) {
   assert.equal(audios.at(-1)?.src, us, "direct mode plays the site's US audio URL");
 
   context.IeltsStudySession.setAccent("uk");
+  await tick();
   assert.equal(audios.at(-1)?.src, uk, "accent switch reloads the UK URL");
 
   const speaker = buttons.at(-1);

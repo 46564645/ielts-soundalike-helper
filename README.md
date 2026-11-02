@@ -1,9 +1,16 @@
-# 听写辨音助手 v2.11.1
+# 听写辨音助手 v2.11.2
 
 这是为以下雅思听写页面定制的 Chrome / Edge 扩展：
 
 - `https://ielts.itongzhuo.com/business/ielts/student/jumpAnswerWordDictation.do`
 - `https://www.idictation.cn/home`
+
+## v2.11.2 离线音频缓存
+
+- 练习预取时同时写入跨会话离线缓存：关闭练习标签页后音频仍保留，断网时优先从缓存播放，不再依赖网站音频。
+- 后台不可用（Orion 直连模式）时，改用页面级 CacheStorage 缓存网页原始音频；缓存命中后播放本地 Blob，不请求网络。
+- 离线缓存上限 2000 个词，命中后不再重复下载；弹窗新增“离线音频缓存”统计与一键清空。
+- iOS 无 CacheStorage 时回退到本地存储（上限 30MB），仍可在断网时播放已缓存词。
 
 ## v2.11.1 Orion 手机浏览器适配
 

@@ -9,6 +9,8 @@
   const CATALOG_ATTRIBUTE = "data-ielts-study-audio-catalog";
   const QUEUE_ATTRIBUTE = "data-ielts-study-runtime-queue";
   const POSITION_KEY = "studySpeakerPositionV1";
+  const PAGE_AUDIO_CACHE = "ielts-study-page-audio-v1";
+  const PAGE_AUDIO_MAX_ITEMS = 2000;
   const catalog = new Map();
   let queue = { occurrences: [], currentIndex: 0, source: "" };
   let session = { active: false, starting: false, id: "", coverageEnd: 0, generation: 0, direct: false };
@@ -19,6 +21,7 @@
   let currentLoad = 0;
   let speaker = null;
   let cacheStatus = { phase: "waiting", ready: 0, total: 0, failed: 0 };
+  let pagePrefetchSignature = "";
 
   document.addEventListener("ielts-study-audio-catalog-ready", consumeCatalog);
   document.addEventListener("ielts-study-runtime-queue-ready", consumeQueue);
@@ -100,8 +103,7 @@
     if (next === accent) return;
     accent = next;
     session.coverageEnd = 0;
-    currentAudioUrl = "";
-    currentAudio = null;
+    clearCurrentAudio();
     if (session.active) scheduleWindow();
     prepareCurrentAudio();
   }
@@ -110,11 +112,10 @@
     const word = normalizeWord(value);
     if (!word || word === currentWord) return;
     currentWord = word;
-    currentAudioUrl = "";
     if (currentAudio) {
       try { currentAudio.pause(); currentAudio.src = ""; } catch {}
-      currentAudio = null;
     }
+    clearCurrentAudio();
     prepareCurrentAudio();
     renderSpeaker();
   }
@@ -145,6 +146,16 @@
     }
     if (session.direct) {
       cacheStatus = { phase: "ready", ready: items.length, total: items.length, failed: 0 };
+      const signature = `${accent}|${items.map((item) => item.audioUrl).join("|")}`;
+      if (signature !== pagePrefetchSignature) {
+        pagePrefetchSignature = signature;
+        void prefetchPageAudio(items).then((count) => {
+          if (!session.direct || !count) return;
+          cacheStatus = { phase: "ready", ready: count, total: items.length, failed: Math.max(0, items.length - count) };
+          prepareCurrentAudio();
+          renderSpeaker();
+        });
+      }
       prepareCurrentAudio();
       renderSpeaker();
       return;
@@ -178,7 +189,7 @@
   function prepareCurrentAudio() {
     if (!session.active || !currentWord) return;
     if (session.direct || !session.id) {
-      applyDirectAudio();
+      void applyDirectAudio();
       return;
     }
     const load = ++currentLoad;
@@ -206,15 +217,84 @@
     return accent === "uk" ? String(item?.ukAudio || "") : String(item?.usAudio || "");
   }
 
-  function applyDirectAudio() {
-    const url = directAudioUrl(currentWord);
+  function pageCacheSupported() {
+    return typeof caches !== "undefined" && typeof caches.open === "function" && typeof fetch === "function";
+  }
+
+  async function openPageAudioCache() {
+    try { return await caches.open(PAGE_AUDIO_CACHE); } catch { return null; }
+  }
+
+  async function prefetchPageAudio(items) {
+    if (!pageCacheSupported() || !items.length) return 0;
+    const store = await openPageAudioCache();
+    if (!store) return 0;
+    let cursor = 0;
+    let ready = 0;
+    const worker = async () => {
+      while (cursor < items.length) {
+        const item = items[cursor++];
+        try {
+          if (await store.match(item.audioUrl)) {
+            ready += 1;
+            continue;
+          }
+          const response = await fetch(item.audioUrl, { credentials: "omit" });
+          if (!response.ok) continue;
+          await store.put(item.audioUrl, response.clone());
+          ready += 1;
+        } catch {}
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, items.length) }, worker));
+    try {
+      const keys = await store.keys();
+      for (const stale of keys.slice(0, Math.max(0, keys.length - PAGE_AUDIO_MAX_ITEMS))) {
+        await store.delete(stale).catch(() => false);
+      }
+    } catch {}
+    return ready;
+  }
+
+  async function readPageAudio(url) {
+    if (!url || !pageCacheSupported()) return "";
+    try {
+      const store = await openPageAudioCache();
+      const cached = await store?.match(url);
+      if (!cached?.ok) return "";
+      const blob = await cached.blob();
+      return blob?.size ? URL.createObjectURL(blob) : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function revokeAudioUrl(url) {
+    if (url && url.startsWith("blob:")) {
+      try { URL.revokeObjectURL(url); } catch {}
+    }
+  }
+
+  function clearCurrentAudio() {
+    revokeAudioUrl(currentAudioUrl);
+    currentAudioUrl = "";
+    currentAudio = null;
+  }
+
+  async function applyDirectAudio() {
+    const word = currentWord;
+    const url = directAudioUrl(word);
     if (!url) {
-      currentAudioUrl = "";
-      currentAudio = null;
+      clearCurrentAudio();
       renderSpeaker();
       return;
     }
-    setCurrentAudio(url);
+    const cached = await readPageAudio(url);
+    if (word !== currentWord) {
+      revokeAudioUrl(cached);
+      return;
+    }
+    setCurrentAudio(cached || url);
   }
 
   function setCurrentAudio(url) {
@@ -222,6 +302,7 @@
       renderSpeaker();
       return;
     }
+    revokeAudioUrl(currentAudioUrl);
     currentAudioUrl = url;
     currentAudio = new Audio(url);
     currentAudio.preload = "auto";

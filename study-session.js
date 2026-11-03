@@ -11,6 +11,7 @@
   const POSITION_KEY = "studySpeakerPositionV1";
   const PAGE_AUDIO_CACHE = "ielts-study-page-audio-v1";
   const PAGE_AUDIO_MAX_ITEMS = 2000;
+  const CURRENT_WORD_ATTRIBUTE = "data-ielts-study-current-word";
   const catalog = new Map();
   let queue = { occurrences: [], currentIndex: 0, source: "" };
   let session = { active: false, starting: false, id: "", coverageEnd: 0, generation: 0, direct: false };
@@ -22,6 +23,7 @@
   let speaker = null;
   let cacheStatus = { phase: "waiting", ready: 0, total: 0, failed: 0 };
   let pagePrefetchSignature = "";
+  let queueCurrentWord = "";
 
   document.addEventListener("ielts-study-audio-catalog-ready", consumeCatalog);
   document.addEventListener("ielts-study-runtime-queue-ready", consumeQueue);
@@ -65,7 +67,7 @@
     queue = { occurrences, currentIndex, source: String(payload.source || "") };
     hydrateQueueAudio();
     const current = occurrences[currentIndex];
-    if (current?.word) setCurrentWord(current.word);
+    if (current?.word) setCurrentWord(current.word, "queue");
     if (session.active) scheduleWindow();
   }
 
@@ -108,9 +110,14 @@
     prepareCurrentAudio();
   }
 
-  function setCurrentWord(value) {
+  function setCurrentWord(value, source = "content") {
     const word = normalizeWord(value);
-    if (!word || word === currentWord) return;
+    if (!word) return;
+    // A live queue or the page itself is authoritative; ignore stale DOM
+    // reads from the analysis panel while the queue already has a word.
+    if (source === "content" && queueCurrentWord && word !== queueCurrentWord) return;
+    if (source === "queue" || source === "page") queueCurrentWord = word;
+    if (word === currentWord) return;
     currentWord = word;
     if (currentAudio) {
       try { currentAudio.pause(); currentAudio.src = ""; } catch {}
@@ -186,26 +193,18 @@
     });
   }
 
-  function prepareCurrentAudio() {
+  async function prepareCurrentAudio() {
     if (!session.active || !currentWord) return;
-    if (session.direct || !session.id) {
-      void applyDirectAudio();
-      return;
-    }
     const load = ++currentLoad;
     const word = currentWord;
-    sendMessage({ type: "GET_STUDY_SESSION_AUDIO", sessionId: session.id, word, accent })
-      .then((response) => {
-        if (load !== currentLoad || word !== currentWord) return;
-        const url = String(response?.audioUrl || "");
-        if (!response?.ok || !response.available || !isAudioDataUrl(url)) {
-          applyDirectAudio();
-          return;
-        }
-        setCurrentAudio(url);
-      }).catch(() => {
-        if (load === currentLoad) applyDirectAudio();
-      });
+    const url = await resolveAudioUrl(word);
+    if (load !== currentLoad || word !== currentWord) return;
+    if (!url) {
+      clearCurrentAudio();
+      renderSpeaker();
+      return;
+    }
+    setCurrentAudio(url);
   }
 
   function isAudioDataUrl(url) {
@@ -215,6 +214,21 @@
   function directAudioUrl(word) {
     const item = catalog.get(normalizeWord(word));
     return accent === "uk" ? String(item?.ukAudio || "") : String(item?.usAudio || "");
+  }
+
+  async function resolveAudioUrl(word) {
+    if (!word) return "";
+    if (session.active && session.id) {
+      try {
+        const response = await sendMessage({ type: "GET_STUDY_SESSION_AUDIO", sessionId: session.id, word, accent });
+        const url = String(response?.audioUrl || "");
+        if (response?.ok && response.available && isAudioDataUrl(url)) return url;
+      } catch {}
+    }
+    const direct = directAudioUrl(word);
+    if (!direct) return "";
+    const cached = await readPageAudio(direct);
+    return cached || direct;
   }
 
   function pageCacheSupported() {
@@ -281,20 +295,66 @@
     currentAudio = null;
   }
 
-  async function applyDirectAudio() {
-    const word = currentWord;
-    const url = directAudioUrl(word);
-    if (!url) {
-      clearCurrentAudio();
-      renderSpeaker();
-      return;
+  function normalizeWordText(value) {
+    const text = String(value || "")
+      .replace(/[·‧]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!/^[A-Za-z][A-Za-z'’\- ]*$/.test(text)) return "";
+    if (text.length > 40 || text.split(/\s+/).length > 3) return "";
+    if (/^(?:n|v|adj|adv|prep|pron|conj|num|art|int|abbr|pl)\.?$/i.test(text)) return "";
+    return text;
+  }
+
+  function readVisibleWord() {
+    const direct = document.querySelector("main .error-word-study > span");
+    const directText = normalizeWordText(direct?.textContent);
+    if (directText) return directText;
+    // Desktop word-detail layout: the word sits next to its IPA, e.g.
+    // <p class="text-2xl"><span>task</span></p> /tɑːsk/ n. 任务
+    const ipaNodes = Array.from(document.querySelectorAll("main div, main p, main span"))
+      .filter((node) => node.children.length === 0 && /^\/[^/]+\/$/.test(String(node.textContent || "").trim()))
+      .slice(0, 12);
+    for (const ipa of ipaNodes) {
+      const container = ipa.parentElement;
+      if (!container) continue;
+      for (const node of container.querySelectorAll("p, span, strong, h1, h2, h3")) {
+        if (node === ipa || node.contains(ipa)) continue;
+        const text = normalizeWordText(node.textContent);
+        if (text) return text;
+      }
     }
-    const cached = await readPageAudio(url);
-    if (word !== currentWord) {
-      revokeAudioUrl(cached);
-      return;
-    }
-    setCurrentAudio(cached || url);
+    return "";
+  }
+
+  function requestPageCurrentWord(timeout = 120) {
+    return new Promise((resolve) => {
+      const root = document.documentElement;
+      if (!root) {
+        resolve("");
+        return;
+      }
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        document.removeEventListener("ielts-study-current-word-ready", finish);
+        const raw = root.getAttribute(CURRENT_WORD_ATTRIBUTE);
+        root.removeAttribute(CURRENT_WORD_ATTRIBUTE);
+        let word = "";
+        try { word = JSON.parse(raw || "{}").word || ""; } catch {}
+        resolve(normalizeWord(word));
+      };
+      document.addEventListener("ielts-study-current-word-ready", finish, { once: true });
+      document.dispatchEvent(new Event("ielts-study-request-current-word"));
+      window.setTimeout(finish, timeout);
+    });
+  }
+
+  async function resolvePageWord() {
+    const domWord = normalizeWord(readVisibleWord());
+    const stateWord = await requestPageCurrentWord(100);
+    return stateWord || domWord;
   }
 
   function setCurrentAudio(url) {
@@ -375,12 +435,26 @@
     });
   }
 
-  function playCurrent() {
-    if (!currentAudio || !currentAudioUrl) {
-      prepareCurrentAudio();
+  async function playCurrent() {
+    // Resolve the word the user is looking at right now; the queue may lag
+    // by a frame or point at another store, and stale DOM reads must not win.
+    const pageWord = await resolvePageWord();
+    if (pageWord) setCurrentWord(pageWord, "page");
+    const word = currentWord;
+    if (!word) {
       pulseSpeaker("failed");
       return;
     }
+    const load = ++currentLoad;
+    const url = await resolveAudioUrl(word);
+    if (load !== currentLoad || word !== currentWord) return;
+    if (!url) {
+      clearCurrentAudio();
+      renderSpeaker();
+      pulseSpeaker("failed");
+      return;
+    }
+    if (url !== currentAudioUrl || !currentAudio) setCurrentAudio(url);
     document.dispatchEvent(new Event("ielts-study-manual-stop-native"));
     try {
       currentAudio.pause();

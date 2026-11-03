@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "听写辨音助手",
-  "version": "2.11.2",
+  "version": "2.11.3",
   "description": "适配 Orion 与 iPhone/iPad 的雅思听写辨音、拼写纠错和发音收藏助手。",
   "permissions": ["storage", "activeTab"],
   "host_permissions": [

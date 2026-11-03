@@ -47,9 +47,11 @@ class FakeAudio {
 const document = {
   documentElement: root,
   addEventListener(type, fn) { documentListeners.set(type, fn); },
+  removeEventListener(type) { documentListeners.delete(type); },
   dispatchEvent() {},
   createElement() { return makeButton(); },
-  querySelector() { return null; }
+  querySelector() { return null; },
+  querySelectorAll() { return []; }
 };
 
 const chrome = {
@@ -131,6 +133,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
   };
   speaker.listeners.get("pointerdown")(event);
   speaker.listeners.get("pointerup")(event);
+  await new Promise((resolve) => setTimeout(resolve, 160));
   assert.equal(audios.at(-1)?.played, true, "tapping the speaker plays the direct URL");
 
   console.log("Study session direct-mode (Orion no-background) tests passed");

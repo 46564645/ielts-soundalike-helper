@@ -1,9 +1,17 @@
-# 听写辨音助手 v2.11.2
+# 听写辨音助手 v2.11.3
 
 这是为以下雅思听写页面定制的 Chrome / Edge 扩展：
 
 - `https://ielts.itongzhuo.com/business/ielts/student/jumpAnswerWordDictation.do`
 - `https://www.idictation.cn/home`
+
+## v2.11.3 点击时校准当前词
+
+- 点击小喇叭时先读取屏幕上当前显示的单词，再按这个词查找缓存音频，不再播放队列里滞后的上一题。
+- 同时兼容手机听写布局（`.error-word-study`）和桌面词条布局（词 + 音标并排），两处都能取到当前词。
+- 听写页队列识别增加 `wordsCopy`、`progress_num`、`words_total` 限定，避免误抓“随身听”等其它 store。
+- 队列词与页面词优先于分析面板的旧 DOM 读值，切题瞬间不再被上一题覆盖。
+- 离线播放沿用同一路径：会话缓存 → 页面缓存 → 网页原始地址。
 
 ## v2.11.2 离线音频缓存
 

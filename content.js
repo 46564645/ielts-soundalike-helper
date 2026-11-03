@@ -1588,11 +1588,39 @@
     return null;
   }
 
+  function normalizeIdictationWord(value) {
+    const text = String(value || "")
+      .replace(/[·‧]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!/^[A-Za-z][A-Za-z'’\- ]*$/.test(text)) return "";
+    if (text.length > 40 || text.split(/\s+/).length > 3) return "";
+    if (/^(?:n|v|adj|adv|prep|pron|conj|num|art|int|abbr|pl)\.?$/i.test(text)) return "";
+    return text;
+  }
+
+  function readIdictationVisibleWord() {
+    const direct = document.querySelector("main .error-word-study > span");
+    const directText = normalizeIdictationWord(direct?.textContent);
+    if (directText) return directText;
+    const ipaNodes = Array.from(document.querySelectorAll("main div, main p, main span"))
+      .filter((node) => node.children.length === 0 && /^\/[^/]+\/$/.test(String(node.textContent || "").trim()))
+      .slice(0, 12);
+    for (const ipa of ipaNodes) {
+      const container = ipa.parentElement;
+      if (!container) continue;
+      for (const node of container.querySelectorAll("p, span, strong, h1, h2, h3")) {
+        if (node === ipa || node.contains(ipa)) continue;
+        const text = normalizeIdictationWord(node.textContent);
+        if (text) return text;
+      }
+    }
+    return "";
+  }
+
   function readIdictationSpellingDetails() {
-    const main = document.querySelector("main");
-    const wordContainer = main?.querySelector(".error-word-study");
-    const word = textOf(wordContainer);
-    if (!word || !/^[A-Za-z][A-Za-z'’\- ]*$/.test(word)) return null;
+    const word = readIdictationVisibleWord();
+    if (!word) return null;
     const clue = readIdictationCurrentClue();
     return {
       word,

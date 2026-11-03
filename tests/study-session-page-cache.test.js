@@ -50,7 +50,10 @@ const document = {
 };
 
 const cacheStore = {
-  async match(url) { return cacheEntries.get(String(url)); },
+  async match(url) {
+    const response = cacheEntries.get(String(url));
+    return response ? response.clone() : undefined;
+  },
   async put(url, response) { cacheEntries.set(String(url), response); },
   async keys() { return [...cacheEntries.keys()]; },
   async delete(url) { return cacheEntries.delete(String(url)); }

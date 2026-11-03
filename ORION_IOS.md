@@ -13,13 +13,13 @@ Orion 使用标准 WebExtensions 接口，不支持 Safari 专有扩展格式。
 输出：
 
 - `dist/orion-extension/`：可直接作为文件夹加载的扩展资源。
-- `dist/ielts-soundalike-helper-orion-v2.11.2.zip`：通过 Orion 的“文件安装”入口导入。
+- `dist/ielts-soundalike-helper-orion-v2.11.3.zip`：通过 Orion 的“文件安装”入口导入。
 
 ## 2. 在 Orion iOS 安装
 
 1. 打开 Orion，点右下角 `•••` → **Settings**，在 **Extensions** 分组中打开 Chrome 扩展支持。
 2. 回到页面，点 `•••` → **Extensions**。
-3. 点 **+**，选择 **file-based extension**，选中 `ielts-soundalike-helper-orion-v2.11.2.zip`。
+3. 点 **+**，选择 **file-based extension**，选中 `ielts-soundalike-helper-orion-v2.11.3.zip`。
 4. 在扩展列表中启用“听写辨音助手”。
 5. 打开 `https://ielts.itongzhuo.com/...` 与 `https://www.idictation.cn/home`，在 Orion 的网站设置里把该扩展设为允许运行。
 

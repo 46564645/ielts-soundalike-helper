@@ -10,6 +10,8 @@
   const CATALOG_ATTRIBUTE = "data-ielts-study-audio-catalog";
   const QUEUE_ATTRIBUTE = "data-ielts-study-runtime-queue";
   const PLAY_ATTRIBUTE = "data-ielts-study-native-play";
+  const CURRENT_WORD_ATTRIBUTE = "data-ielts-study-current-word";
+  let runtimeStudyState = null;
   const catalog = new Map();
   let lastCatalogSignature = "";
   let lastQueueSignature = "";
@@ -113,7 +115,10 @@
       if (!value || typeof value !== "object" || seen.has(value)) continue;
       seen.add(value);
       const state = queueShape(value);
-      if (state) return state;
+      if (state) {
+        runtimeStudyState = state;
+        return state;
+      }
       if (depth >= 7 || (typeof Node !== "undefined" && value instanceof Node) ||
           (typeof Window !== "undefined" && value instanceof Window)) continue;
       let keys;
@@ -130,13 +135,22 @@
 
   function queueShape(value) {
     let words;
+    let wordsCopy;
     let currentWord;
     let currentIndex;
+    let progress;
+    let total;
     try {
       words = value.words;
+      wordsCopy = value.wordsCopy;
       currentWord = value.currentWord;
       currentIndex = Number(value.currentIndex);
+      progress = Number(value.progress_num);
+      total = Number(value.words_total);
     } catch { return null; }
+    // The dictation page keeps these fields; the walkman player has only
+    // words/currentWord/currentIndex and must not be mistaken for it.
+    if (!Array.isArray(wordsCopy) || !Number.isFinite(progress) || !Number.isFinite(total)) return null;
     if (!Array.isArray(words) || words.length < 1 || words.length > 2000 || !Number.isInteger(currentIndex)) return null;
     if (currentIndex < 0 || currentIndex >= words.length || !currentWord || typeof currentWord !== "object") return null;
     const valid = words.filter((row) => cleanWord(row?.word)).length;
@@ -218,6 +232,14 @@
     document.dispatchEvent(new CustomEvent(eventName));
   }
 
+  function publishCurrentWord() {
+    const state = runtimeStudyState || findRuntimeStudyState();
+    const word = cleanWord(state?.currentWord?.word || state?.words?.[state?.currentIndex]?.word || "");
+    if (!word) return;
+    publish(CURRENT_WORD_ATTRIBUTE, "ielts-study-current-word-ready", { word, observedAt: Date.now() });
+  }
+
+  document.addEventListener("ielts-study-request-current-word", publishCurrentWord);
   observeNativePlay();
   if (typeof window.setInterval === "function") {
     const scanTimer = window.setInterval(publishRuntimeQueue, 500);
